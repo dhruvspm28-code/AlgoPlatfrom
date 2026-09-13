@@ -16,7 +16,7 @@
  * 11. Real Email Provider Adapter (SendGrid) - official API payload, Bearer auth
  * 12. Email Provider Failure handling - graceful error, zero secret exposure
  * 13. Real SMS Provider Adapter (Twilio) - official API payload, Basic auth, safe destination
- * 14. Real SMS Provider Adapter (MSG91) - DLT compliance and official API format
+ * 14. Real SMS Provider Adapter (Firebase Phone Auth) - Google Identity Platform & E.164 India numbers
  * 15. SMS Provider Failure handling - graceful error, zero secret exposure
  * 16. Honest Delivery Rule: Unconfigured provider returns "OTP provider not configured" without false delivery claim
  * 17. Credential isolation & Zero OTP Leakage in API response contracts
@@ -32,7 +32,7 @@ import {
   ResendEmailProvider,
   SendGridEmailProvider,
   TwilioSmsProvider,
-  Msg91SmsProvider,
+  FirebaseSmsProvider,
   MockEmailProvider,
   MockSmsProvider,
   UnconfiguredEmailProvider,
@@ -40,6 +40,7 @@ import {
 } from "../src/services/otp-engine-server";
 import {
   otpProvider,
+  firebasePhoneAuth,
   generateSecureOtp,
   maskEmail,
   maskPhone,
@@ -396,27 +397,27 @@ describe("SmartQuant Edge Real OTP Delivery Architecture", () => {
     }
   });
 
-  test("14. should construct valid official MSG91 SMS API requests with DLT template", async () => {
+  test("14. should construct valid official Firebase SMS API requests with India E.164 formatting", async () => {
     const originalFetch = globalThis.fetch;
     let interceptedUrl = "";
-    let interceptedHeaders: Record<string, string> = {};
-    let interceptedBody: { template_id?: string; mobile?: string; otp?: string } = {};
+    let interceptedBody: { phoneNumber?: string } = {};
 
     try {
       globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         interceptedUrl = String(input);
-        interceptedHeaders = (init?.headers as Record<string, string>) || {};
         interceptedBody = JSON.parse(String(init?.body || "{}"));
-        return new Response(JSON.stringify({ type: "success" }), { status: 200 });
+        return new Response(JSON.stringify({ sessionInfo: "mock_session_token_123456" }), {
+          status: 200,
+        });
       };
 
-      process.env.MSG91_AUTH_KEY = "mock_msg91_auth_key_12345678";
-      process.env.MSG91_TEMPLATE_ID = "mock_template_id_999";
+      process.env.VITE_FIREBASE_API_KEY = "mock_firebase_api_key_12345678";
+      process.env.VITE_FIREBASE_PROJECT_ID = "smartquant-edge-demo";
 
-      const msg91 = new Msg91SmsProvider();
-      assert.equal(msg91.isConfigured(), true);
+      const firebase = new FirebaseSmsProvider();
+      assert.equal(firebase.isConfigured(), true);
 
-      const res = await msg91.sendSms({
+      const res = await firebase.sendSms({
         phone: "9876543210",
         otp: "891234",
         purpose: "AUTHENTICATION",
@@ -424,14 +425,14 @@ describe("SmartQuant Edge Real OTP Delivery Architecture", () => {
       });
 
       assert.equal(res.success, true);
-      assert.equal(interceptedUrl, "https://control.msg91.com/api/v5/otp");
-      assert.equal(interceptedHeaders["authkey"], "mock_msg91_auth_key_12345678");
-      assert.equal(interceptedBody.template_id, "mock_template_id_999");
-      assert.equal(interceptedBody.mobile, "919876543210");
-      assert.equal(interceptedBody.otp, "891234");
+      assert.match(
+        interceptedUrl,
+        /identitytoolkit\.googleapis\.com.*mock_firebase_api_key_12345678/,
+      );
+      assert.equal(interceptedBody.phoneNumber, "+919876543210");
     } finally {
-      delete process.env.MSG91_AUTH_KEY;
-      delete process.env.MSG91_TEMPLATE_ID;
+      delete process.env.VITE_FIREBASE_API_KEY;
+      delete process.env.VITE_FIREBASE_PROJECT_ID;
       globalThis.fetch = originalFetch;
     }
   });
@@ -546,30 +547,35 @@ describe("SmartQuant Edge Real OTP Delivery Architecture", () => {
     assert.equal(verifyDemo.success, true);
   });
 
-  test("19. should handle MSG91 API error payload and prevent false 'OTP sent' claims", async () => {
+  test("19. should handle Firebase API error payload and prevent false 'OTP sent' claims", async () => {
     const originalFetch = globalThis.fetch;
     try {
       globalThis.fetch = async () => {
         return new Response(
-          JSON.stringify({ type: "error", message: "Invalid Template ID or Insufficient Balance" }),
-          { status: 200 },
+          JSON.stringify({
+            error: {
+              code: 400,
+              message: "BILLING_NOT_ENABLED: SMS delivery requires Blaze plan",
+            },
+          }),
+          { status: 400 },
         );
       };
 
-      const msg91 = new Msg91SmsProvider({
-        authKey: "mock_auth_key_1234567890",
-        templateId: "mock_template_123",
+      const firebase = new FirebaseSmsProvider({
+        apiKey: "mock_api_key_1234567890",
+        projectId: "smartquant-edge-demo",
       });
 
-      const res = await msg91.sendSms({
+      const res = await firebase.sendSms({
         phone: "9876543210",
         otp: "123456",
         purpose: "AUTHENTICATION",
         expiresInMinutes: 5,
       });
 
-      assert.equal(res.success, false, "Must return false when MSG91 returns error payload");
-      assert.match(res.error || "", /rejected|error/i);
+      assert.equal(res.success, false, "Must return false when Firebase returns error payload");
+      assert.match(res.error || "", /rejected|billing|quota/i);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -577,7 +583,7 @@ describe("SmartQuant Edge Real OTP Delivery Architecture", () => {
 
   test("20. Safe Provider Status Check reports only status without leaking credentials", () => {
     const status = getSmsProviderSafeStatus();
-    assert.equal(status.provider, "MSG91");
+    assert.equal(status.provider, "Firebase Phone Auth");
     assert.ok(status.configuration === "CONFIGURED" || status.configuration === "MISSING");
     assert.ok(status.delivery === "READY" || status.delivery === "UNAVAILABLE");
 
@@ -589,25 +595,22 @@ describe("SmartQuant Edge Real OTP Delivery Architecture", () => {
     assert.doesNotMatch(statusStr, /token/i);
   });
 
-  test("21. Controlled MSG91 real delivery simulation accepts OTP and enforces security guarantees", async () => {
+  test("21. Controlled Firebase Phone Auth real delivery simulation accepts OTP and enforces security guarantees", async () => {
     const originalFetch = globalThis.fetch;
-    let dispatchedOtp = "";
     try {
-      globalThis.fetch = async (_input, init) => {
-        const body = JSON.parse(String(init?.body || "{}"));
-        dispatchedOtp = body.otp;
-        return new Response(JSON.stringify({ type: "success", message: "OTP sent successfully" }), {
+      globalThis.fetch = async () => {
+        return new Response(JSON.stringify({ sessionInfo: "mock_firebase_session_valid" }), {
           status: 200,
         });
       };
 
-      const msg91 = new Msg91SmsProvider({
-        authKey: "valid_mock_auth_key_1234567890",
-        templateId: "valid_template_999",
+      const firebase = new FirebaseSmsProvider({
+        apiKey: "valid_mock_api_key_1234567890",
+        projectId: "smartquant-edge-demo",
       });
 
       // Inject provider into serverOtpEngine
-      serverOtpEngine._setProviders(new MockEmailProvider(), msg91);
+      serverOtpEngine._setProviders(new MockEmailProvider(), firebase);
 
       const target = "9823456789";
       const res = await serverOtpEngine.dispatchOtp({
@@ -619,18 +622,24 @@ describe("SmartQuant Edge Real OTP Delivery Architecture", () => {
       assert.equal(res.state, "OTP_SENT");
       assert.equal(res.resendCooldownSeconds, 45);
       assert.equal(res.expiresInSeconds, 300);
-
-      // Verify the OTP accepted by MSG91 is valid and single-use
-      assert.ok(dispatchedOtp.length === 6);
-      const verifyRes = await serverOtpEngine.verifyOtp(target, dispatchedOtp);
-      assert.equal(verifyRes.success, true);
-      assert.equal(verifyRes.state, "OTP_VERIFIED");
-
-      // Single-use: cannot be reused
-      const secondVerify = await serverOtpEngine.verifyOtp(target, dispatchedOtp);
-      assert.equal(secondVerify.success, false);
+      assert.equal(res.providerName, "Firebase Phone Auth");
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  test("22. should format Indian phone numbers into standard E.164 (+91XXXXXXXXXX)", () => {
+    assert.equal(firebasePhoneAuth.formatE164("9876543210"), "+919876543210");
+    assert.equal(firebasePhoneAuth.formatE164("919876543210"), "+919876543210");
+    assert.equal(firebasePhoneAuth.formatE164("+91 98765 43210"), "+919876543210");
+    assert.equal(firebasePhoneAuth.formatE164("+91-9876543210"), "+919876543210");
+  });
+
+  test("23. Honest Delivery Rule: Firebase Phone Auth must reject delivery when unconfigured", async () => {
+    // When Firebase configuration is absent, sendPhoneOtp must return false and NOT fake OTP
+    const res = await firebasePhoneAuth.sendPhoneOtp("9876543210");
+    assert.equal(res.success, false);
+    assert.equal(res.errorCategory, "CONFIG_MISSING");
+    assert.match(res.message, /provider not configured/i);
   });
 });

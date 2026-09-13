@@ -32,9 +32,12 @@ export function checkEnvConfigured(): SafeEnvStatus {
   let smsProvider = process.env.SMS_OTP_PROVIDER || process.env.OTP_PROVIDER || "";
   let smsApiKey =
     process.env.SMS_OTP_API_KEY ||
+    process.env.VITE_FIREBASE_API_KEY ||
+    process.env.FIREBASE_API_KEY ||
     process.env.TWILIO_AUTH_TOKEN ||
-    process.env.MSG91_AUTH_KEY ||
     "";
+  let firebaseProjectId =
+    process.env.VITE_FIREBASE_PROJECT_ID || process.env.FIREBASE_PROJECT_ID || "";
 
   const envPath = path.resolve(process.cwd(), ".env");
   if (fs.existsSync(envPath)) {
@@ -82,6 +85,39 @@ export function checkEnvConfigured(): SafeEnvStatus {
           .replace(/^["']|["']$/g, "")
           .trim();
         process.env.SMS_OTP_API_KEY = smsApiKey;
+      } else if (trimmed.startsWith("VITE_FIREBASE_API_KEY=")) {
+        const val = trimmed
+          .slice("VITE_FIREBASE_API_KEY=".length)
+          .replace(/^["']|["']$/g, "")
+          .trim();
+        process.env.VITE_FIREBASE_API_KEY = val;
+        smsApiKey = smsApiKey || val;
+      } else if (trimmed.startsWith("FIREBASE_API_KEY=")) {
+        const val = trimmed
+          .slice("FIREBASE_API_KEY=".length)
+          .replace(/^["']|["']$/g, "")
+          .trim();
+        process.env.FIREBASE_API_KEY = val;
+        smsApiKey = smsApiKey || val;
+      } else if (trimmed.startsWith("VITE_FIREBASE_PROJECT_ID=")) {
+        const val = trimmed
+          .slice("VITE_FIREBASE_PROJECT_ID=".length)
+          .replace(/^["']|["']$/g, "")
+          .trim();
+        process.env.VITE_FIREBASE_PROJECT_ID = val;
+        firebaseProjectId = firebaseProjectId || val;
+      } else if (trimmed.startsWith("FIREBASE_PROJECT_ID=")) {
+        const val = trimmed
+          .slice("FIREBASE_PROJECT_ID=".length)
+          .replace(/^["']|["']$/g, "")
+          .trim();
+        process.env.FIREBASE_PROJECT_ID = val;
+        firebaseProjectId = firebaseProjectId || val;
+      } else if (trimmed.startsWith("VITE_FIREBASE_AUTH_DOMAIN=")) {
+        process.env.VITE_FIREBASE_AUTH_DOMAIN = trimmed
+          .slice("VITE_FIREBASE_AUTH_DOMAIN=".length)
+          .replace(/^["']|["']$/g, "")
+          .trim();
       } else if (trimmed.startsWith("TWILIO_ACCOUNT_SID=")) {
         process.env.TWILIO_ACCOUNT_SID = trimmed
           .slice("TWILIO_ACCOUNT_SID=".length)
@@ -97,16 +133,6 @@ export function checkEnvConfigured(): SafeEnvStatus {
           .slice("TWILIO_FROM=".length)
           .replace(/^["']|["']$/g, "")
           .trim();
-      } else if (trimmed.startsWith("MSG91_AUTH_KEY=")) {
-        process.env.MSG91_AUTH_KEY = trimmed
-          .slice("MSG91_AUTH_KEY=".length)
-          .replace(/^["']|["']$/g, "")
-          .trim();
-      } else if (trimmed.startsWith("MSG91_TEMPLATE_ID=")) {
-        process.env.MSG91_TEMPLATE_ID = trimmed
-          .slice("MSG91_TEMPLATE_ID=".length)
-          .replace(/^["']|["']$/g, "")
-          .trim();
       }
     }
   }
@@ -114,12 +140,15 @@ export function checkEnvConfigured(): SafeEnvStatus {
   const isEmailConfigured =
     emailProvider.toLowerCase() === "mock" || (!!emailApiKey && emailApiKey.length > 10);
 
+  const isFirebase =
+    smsProvider.toLowerCase() === "firebase" ||
+    !smsProvider ||
+    smsProvider.toLowerCase() === "mock";
+
   const isSmsConfigured =
     smsProvider.toLowerCase() === "mock" ||
-    (smsProvider.toLowerCase() === "msg91"
-      ? !!process.env.MSG91_AUTH_KEY &&
-        process.env.MSG91_AUTH_KEY.length > 10 &&
-        !!process.env.MSG91_TEMPLATE_ID
+    (isFirebase
+      ? !!smsApiKey && smsApiKey.length > 10 && !!firebaseProjectId
       : !!smsApiKey && smsApiKey.length > 8);
 
   return {
@@ -128,7 +157,7 @@ export function checkEnvConfigured(): SafeEnvStatus {
     emailOtpConfigured: isEmailConfigured,
     emailOtpProvider: emailProvider || "unconfigured",
     smsOtpConfigured: isSmsConfigured,
-    smsOtpProvider: smsProvider || "unconfigured",
+    smsOtpProvider: smsProvider || "firebase",
   };
 }
 
@@ -141,12 +170,16 @@ export interface SmsSafeStatus {
 export function getSmsProviderSafeStatus(): SmsSafeStatus {
   checkEnvConfigured();
   const providerRaw = (process.env.SMS_OTP_PROVIDER || "").toLowerCase();
-  const authKey = process.env.MSG91_AUTH_KEY || process.env.SMS_OTP_API_KEY || "";
-  const templateId = process.env.MSG91_TEMPLATE_ID || process.env.SMS_OTP_SENDER_ID || "";
+  const apiKey =
+    process.env.VITE_FIREBASE_API_KEY ||
+    process.env.FIREBASE_API_KEY ||
+    process.env.SMS_OTP_API_KEY ||
+    "";
+  const projectId = process.env.VITE_FIREBASE_PROJECT_ID || process.env.FIREBASE_PROJECT_ID || "";
 
-  const isMsg91 = providerRaw === "msg91" || !providerRaw || providerRaw === "mock";
-  const providerName = isMsg91 ? "MSG91" : providerRaw.toUpperCase();
-  const isConfigured = !!authKey && authKey.length > 10 && !!templateId;
+  const isFirebase = providerRaw === "firebase" || !providerRaw || providerRaw === "mock";
+  const providerName = isFirebase ? "Firebase Phone Auth" : providerRaw.toUpperCase();
+  const isConfigured = !!apiKey && apiKey.length > 10 && !!projectId;
 
   return {
     provider: providerName,

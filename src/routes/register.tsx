@@ -185,6 +185,7 @@ export function Register() {
       hasDematDeclared,
       selectedBroker,
       brokerClientId: brokerClientId.trim() || undefined,
+      channel: "SMS",
     });
 
     setLoading(false);
@@ -214,13 +215,14 @@ export function Register() {
       hasDematDeclared,
       selectedBroker,
       brokerClientId: brokerClientId.trim() || undefined,
+      channel: "SMS",
     });
 
     setLoading(false);
 
     if (res.success) {
       setResendSeconds(45);
-      toast.info(`New verification code dispatched to ${maskEmail(email)}`);
+      toast.info(`New verification code dispatched via SMS to ${maskPhone(phone)}`);
     } else {
       toast.error(res.message || "Unable to send verification code. Please try again.");
     }
@@ -797,8 +799,8 @@ export function Register() {
               <MailCheck className="h-3.5 w-3.5 text-primary" /> Enter verification code
             </p>
             <p className="text-xs">
-              Code sent to:{" "}
-              <strong className="text-foreground font-mono">{maskEmail(email)}</strong>
+              Code sent via SMS to:{" "}
+              <strong className="text-foreground font-mono">{maskPhone(phone)}</strong>
             </p>
           </div>
 
@@ -861,6 +863,9 @@ export function Register() {
           </div>
         </form>
       )}
+
+      {/* Invisible reCAPTCHA container for Firebase Phone Authentication */}
+      <div id="recaptcha-container" className="invisible" />
     </AuthShell>
   );
 }

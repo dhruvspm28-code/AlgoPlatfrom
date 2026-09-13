@@ -3,7 +3,7 @@
  *
  * Implements real-time OTP delivery with official provider adapters:
  * - Email: Resend (api.resend.com), SendGrid (api.sendgrid.com/v3), Mock
- * - SMS: Twilio (api.twilio.com), MSG91 (control.msg91.com/api/v5), Fast2SMS (fast2sms.com/dev), Mock
+ * - SMS: Firebase Phone Auth (Google Identity Platform), Twilio (api.twilio.com), Mock
  *
  * Security Guarantees:
  * 1. Cryptographically secure 6-digit random token generation.
@@ -430,23 +430,30 @@ export class TwilioSmsProvider implements SmsOtpProvider {
 }
 
 // ==========================================
-// MSG91 SMS PROVIDER (OFFICIAL API)
+// FIREBASE PHONE AUTH SMS PROVIDER
 // ==========================================
 
-export class Msg91SmsProvider implements SmsOtpProvider {
-  public readonly name = "MSG91";
-  private authKey: string;
-  private templateId: string;
+export class FirebaseSmsProvider implements SmsOtpProvider {
+  public readonly name = "Firebase Phone Auth";
+  private apiKey: string;
+  private projectId: string;
 
-  constructor(options?: { authKey?: string; templateId?: string }) {
-    this.authKey =
-      options?.authKey || process.env.MSG91_AUTH_KEY || process.env.SMS_OTP_API_KEY || "";
-    this.templateId =
-      options?.templateId || process.env.MSG91_TEMPLATE_ID || process.env.SMS_OTP_SENDER_ID || "";
+  constructor(options?: { apiKey?: string; projectId?: string }) {
+    this.apiKey =
+      options?.apiKey ||
+      process.env.VITE_FIREBASE_API_KEY ||
+      process.env.FIREBASE_API_KEY ||
+      process.env.SMS_OTP_API_KEY ||
+      "";
+    this.projectId =
+      options?.projectId ||
+      process.env.VITE_FIREBASE_PROJECT_ID ||
+      process.env.FIREBASE_PROJECT_ID ||
+      "";
   }
 
   public isConfigured(): boolean {
-    return !!this.authKey && this.authKey.length > 10 && !!this.templateId;
+    return !!this.apiKey && this.apiKey.length > 10 && !!this.projectId;
   }
 
   public async sendSms(params: {
@@ -456,39 +463,41 @@ export class Msg91SmsProvider implements SmsOtpProvider {
     expiresInMinutes: number;
   }): Promise<{ success: boolean; messageId?: string; error?: string }> {
     if (!this.isConfigured()) {
-      return { success: false, error: "MSG91 credentials not configured" };
+      return { success: false, error: "Firebase Phone Auth credentials not configured" };
     }
 
     try {
       const cleanPhone = params.phone.replace(/[^0-9]/g, "");
-      const mobile = cleanPhone.length === 10 ? `91${cleanPhone}` : cleanPhone;
+      const formattedPhone = cleanPhone.length === 10 ? `+91${cleanPhone}` : `+${cleanPhone}`;
 
-      const response = await fetch("https://control.msg91.com/api/v5/otp", {
+      // In server context: communicate with Google Identity Toolkit REST API
+      const url = `https://identitytoolkit.googleapis.com/v1/accounts:sendVerificationCode?key=${this.apiKey}`;
+      const response = await fetch(url, {
         method: "POST",
-        headers: {
-          authkey: this.authKey,
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          template_id: this.templateId,
-          mobile,
-          otp: params.otp,
-          otp_expiry: params.expiresInMinutes,
+          phoneNumber: formattedPhone,
         }),
       });
 
       if (!response.ok) {
-        return { success: false, error: `MSG91 HTTP error ${response.status}` };
+        const data = (await response.json().catch(() => ({}))) as {
+          error?: { message?: string; code?: number };
+        };
+        const errMsg = data.error?.message || `HTTP ${response.status}`;
+        if (errMsg.includes("BILLING") || errMsg.includes("PROJECT_NOT_FOUND")) {
+          return { success: false, error: "Firebase SMS rejected: Blaze billing required" };
+        }
+        if (errMsg.includes("QUOTA") || errMsg.includes("TOO_MANY_ATTEMPTS")) {
+          return { success: false, error: "Firebase SMS rejected: Quota exceeded" };
+        }
+        return { success: false, error: `Firebase SMS delivery request rejected: ${errMsg}` };
       }
 
-      const data = (await response.json().catch(() => ({}))) as { type?: string; message?: string };
-      if (data.type === "error") {
-        return { success: false, error: "MSG91 delivery request rejected" };
-      }
-
-      return { success: true, messageId: "msg91_sent" };
+      const data = (await response.json().catch(() => ({}))) as { sessionInfo?: string };
+      return { success: true, messageId: data.sessionInfo || "firebase_sms_sent" };
     } catch {
-      return { success: false, error: "Network connection to MSG91 failed" };
+      return { success: false, error: "Network connection to Firebase service failed" };
     }
   }
 }
@@ -618,11 +627,11 @@ export class ServerOtpEngine {
 
     if (prov === "mock") return new MockSmsProvider();
 
+    const firebase = new FirebaseSmsProvider();
+    if (firebase.isConfigured() || prov === "firebase") return firebase;
+
     const twilio = new TwilioSmsProvider();
     if (twilio.isConfigured() || prov === "twilio") return twilio;
-
-    const msg91 = new Msg91SmsProvider();
-    if (msg91.isConfigured() || prov === "msg91") return msg91;
 
     return new UnconfiguredSmsProvider();
   }
@@ -894,6 +903,13 @@ export class ServerOtpEngine {
    * Verifies an OTP entered by the user.
    */
   public verifyOtp(target: string, code: string): OtpVerificationResponse {
+    if (!code || typeof code !== "string") {
+      return {
+        success: false,
+        message: "Invalid verification code format.",
+        state: "OTP_INVALID",
+      };
+    }
     const normKey = target.trim().toLowerCase();
     const record = this.otpStore.get(normKey);
     const now = Date.now();

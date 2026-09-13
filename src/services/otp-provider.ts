@@ -21,7 +21,9 @@ import {
   type OtpVerificationResponse,
   type OtpLifecycleState,
 } from "./otp-engine-server";
+import { firebasePhoneAuth } from "./firebase-phone-auth";
 
+export { firebasePhoneAuth };
 export type { OtpChannel };
 
 export interface OtpDeliveryResult {
@@ -88,32 +90,88 @@ class SmartQuantOtpEngine implements OtpProvider {
     const isDemo = options?.isDemo ?? isDemoAccount(target);
     const purpose = options?.purpose ?? "AUTHENTICATION";
 
-    // Client-side execution in browser: dispatch via server API endpoint
-    if (typeof window !== "undefined" && typeof fetch === "function") {
-      try {
-        const res = await fetch("/api/auth/otp/send", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ target, channel, purpose, isDemo }),
-        });
+    // Client-side execution in browser: route real SMS via Firebase Phone Auth
+    if (typeof window !== "undefined") {
+      if (channel === "SMS" && !isDemo) {
+        if (firebasePhoneAuth.isConfigured()) {
+          const fbRes = await firebasePhoneAuth.sendPhoneOtp(target);
+          if (fbRes.success) {
+            if (typeof fetch === "function") {
+              fetch("/api/auth/otp/send", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ target, channel, purpose, isDemo }),
+              }).catch(() => {});
+            }
+            return {
+              success: true,
+              destinationMasked: maskPhone(target),
+              channel: "SMS",
+              expiresInSeconds: 300,
+              resendCooldownSeconds: 45,
+              message: fbRes.message,
+              providerName: "Firebase Phone Auth",
+              state: "OTP_SENT",
+              isDemo: false,
+            };
+          }
+          return {
+            success: false,
+            destinationMasked: maskPhone(target),
+            channel: "SMS",
+            expiresInSeconds: 0,
+            resendCooldownSeconds: 0,
+            message: fbRes.message,
+            providerName: "Firebase Phone Auth",
+            state: "OTP_DELIVERY_FAILED",
+            isDemo: false,
+          };
+        } else {
+          // Firebase not configured - Honest Delivery Rule
+          return {
+            success: false,
+            destinationMasked: maskPhone(target),
+            channel: "SMS",
+            expiresInSeconds: 0,
+            resendCooldownSeconds: 0,
+            message: "Unable to send verification code. OTP provider not configured.",
+            providerName: "Firebase Phone Auth",
+            state: "OTP_DELIVERY_FAILED",
+            isDemo: false,
+          };
+        }
+      }
 
-        const data = (await res.json()) as OtpDeliveryResponse;
-        return {
-          success: data.success,
-          destinationMasked:
-            data.destinationMasked || (channel === "EMAIL" ? maskEmail(target) : maskPhone(target)),
-          channel: data.channel || channel,
-          expiresInSeconds: data.expiresInSeconds || (data.success ? 300 : 0),
-          resendCooldownSeconds: data.resendCooldownSeconds || (data.success ? 45 : 0),
-          message:
-            data.message ||
-            (data.success ? "Verification code dispatched." : "Unable to send verification code."),
-          providerName: data.providerName,
-          state: data.state,
-          isDemo: data.isDemo ?? isDemo,
-        };
-      } catch {
-        // If HTTP endpoint fails, fallback to in-process engine
+      // Email channel or demo user via server endpoint
+      if (typeof fetch === "function") {
+        try {
+          const res = await fetch("/api/auth/otp/send", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ target, channel, purpose, isDemo }),
+          });
+
+          const data = (await res.json()) as OtpDeliveryResponse;
+          return {
+            success: data.success,
+            destinationMasked:
+              data.destinationMasked ||
+              (channel === "EMAIL" ? maskEmail(target) : maskPhone(target)),
+            channel: data.channel || channel,
+            expiresInSeconds: data.expiresInSeconds || (data.success ? 300 : 0),
+            resendCooldownSeconds: data.resendCooldownSeconds || (data.success ? 45 : 0),
+            message:
+              data.message ||
+              (data.success
+                ? "Verification code dispatched."
+                : "Unable to send verification code."),
+            providerName: data.providerName,
+            state: data.state,
+            isDemo: data.isDemo ?? isDemo,
+          };
+        } catch {
+          // Fallback to in-process engine
+        }
       }
     }
 
@@ -140,27 +198,53 @@ class SmartQuantOtpEngine implements OtpProvider {
 
   /**
    * Verifies an OTP entered by the user.
-   * In browser context: calls server endpoint POST /api/auth/otp/verify.
+   * In browser context: verifies with Firebase Phone Auth for real SMS, or server endpoint for Email/Demo.
    * In server context: calls serverOtpEngine directly.
    */
   public async verifyOtp(target: string, code: string): Promise<OtpVerificationResult> {
-    if (typeof window !== "undefined" && typeof fetch === "function") {
-      try {
-        const res = await fetch("/api/auth/otp/verify", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ target, code }),
-        });
-
-        const data = (await res.json()) as OtpVerificationResponse;
+    if (typeof window !== "undefined") {
+      const isPhone = !target.includes("@") && target.replace(/[^0-9]/g, "").length >= 10;
+      if (isPhone && !isDemoAccount(target) && firebasePhoneAuth.isConfigured()) {
+        const confirmRes = await firebasePhoneAuth.confirmPhoneOtp(target, code);
+        if (!confirmRes.success) {
+          return {
+            success: false,
+            message: confirmRes.message,
+            state: confirmRes.errorCategory === "CODE_EXPIRED" ? "OTP_EXPIRED" : "OTP_INVALID",
+          };
+        }
+        if (typeof fetch === "function") {
+          fetch("/api/auth/otp/verify", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ target, code }),
+          }).catch(() => {});
+        }
         return {
-          success: data.success,
-          message: data.message,
-          attemptsRemaining: data.attemptsRemaining,
-          state: data.state,
+          success: true,
+          message: "✓ Identity verified",
+          state: "OTP_VERIFIED",
         };
-      } catch {
-        // Fallback to in-process engine
+      }
+
+      if (typeof fetch === "function") {
+        try {
+          const res = await fetch("/api/auth/otp/verify", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ target, code }),
+          });
+
+          const data = (await res.json()) as OtpVerificationResponse;
+          return {
+            success: data.success,
+            message: data.message,
+            attemptsRemaining: data.attemptsRemaining,
+            state: data.state,
+          };
+        } catch {
+          // Fallback to in-process engine
+        }
       }
     }
 
@@ -186,13 +270,23 @@ class SmartQuantOtpEngine implements OtpProvider {
       try {
         const res = await fetch("/api/auth/otp/status");
         if (res.ok) {
-          return await res.json();
+          const data = await res.json();
+          return {
+            ...data,
+            smsProvider: "Firebase Phone Auth",
+            smsConfigured: firebasePhoneAuth.isConfigured() || data.smsConfigured,
+          };
         }
       } catch {
         // Fallback
       }
     }
-    return serverOtpEngine.getProviderStatus();
+    const status = serverOtpEngine.getProviderStatus();
+    return {
+      ...status,
+      smsProvider: "Firebase Phone Auth",
+      smsConfigured: firebasePhoneAuth.isConfigured() || status.smsConfigured,
+    };
   }
 
   /**

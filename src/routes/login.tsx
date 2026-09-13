@@ -501,6 +501,8 @@ function Login() {
           </p>
         </div>
       </form>
+      {/* Invisible reCAPTCHA container for Firebase Phone Authentication */}
+      <div id="recaptcha-container" className="invisible" />
     </AuthShell>
   );
 }

@@ -385,6 +385,8 @@ function ForgotPassword() {
           <ArrowRight className="ml-1.5 h-4 w-4" />
         </Button>
       </form>
+      {/* Invisible reCAPTCHA container for Firebase Phone Authentication */}
+      <div id="recaptcha-container" className="invisible" />
     </AuthShell>
   );
 }
