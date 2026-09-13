@@ -115,7 +115,12 @@ export function checkEnvConfigured(): SafeEnvStatus {
     emailProvider.toLowerCase() === "mock" || (!!emailApiKey && emailApiKey.length > 10);
 
   const isSmsConfigured =
-    smsProvider.toLowerCase() === "mock" || (!!smsApiKey && smsApiKey.length > 8);
+    smsProvider.toLowerCase() === "mock" ||
+    (smsProvider.toLowerCase() === "msg91"
+      ? !!process.env.MSG91_AUTH_KEY &&
+        process.env.MSG91_AUTH_KEY.length > 10 &&
+        !!process.env.MSG91_TEMPLATE_ID
+      : !!smsApiKey && smsApiKey.length > 8);
 
   return {
     growwApiKey: !!apiKey && apiKey.length > 10,
@@ -127,18 +132,41 @@ export function checkEnvConfigured(): SafeEnvStatus {
   };
 }
 
+export interface SmsSafeStatus {
+  provider: string;
+  configuration: "CONFIGURED" | "MISSING";
+  delivery: "READY" | "UNAVAILABLE";
+}
+
+export function getSmsProviderSafeStatus(): SmsSafeStatus {
+  checkEnvConfigured();
+  const providerRaw = (process.env.SMS_OTP_PROVIDER || "").toLowerCase();
+  const authKey = process.env.MSG91_AUTH_KEY || process.env.SMS_OTP_API_KEY || "";
+  const templateId = process.env.MSG91_TEMPLATE_ID || process.env.SMS_OTP_SENDER_ID || "";
+
+  const isMsg91 = providerRaw === "msg91" || !providerRaw || providerRaw === "mock";
+  const providerName = isMsg91 ? "MSG91" : providerRaw.toUpperCase();
+  const isConfigured = !!authKey && authKey.length > 10 && !!templateId;
+
+  return {
+    provider: providerName,
+    configuration: isConfigured ? "CONFIGURED" : "MISSING",
+    delivery: isConfigured ? "READY" : "UNAVAILABLE",
+  };
+}
+
+export function printSafeStatusReport(): void {
+  const status = getSmsProviderSafeStatus();
+  console.log(`SMS Provider: ${status.provider}`);
+  console.log(`Configuration: ${status.configuration}`);
+  console.log(`Delivery: ${status.delivery}`);
+}
+
 // If executed directly
 if (
-  import.meta.url === `file://${process.argv[1]}` ||
-  process.argv[1]?.includes("safe-env-check")
+  process.argv[1]?.includes("safe-env") ||
+  process.argv[1]?.includes("check-sms") ||
+  import.meta.url === `file://${process.argv[1]}`
 ) {
-  const status = checkEnvConfigured();
-  console.log(`GROWW_API_KEY: ${status.growwApiKey ? "CONFIGURED" : "MISSING"}`);
-  console.log(`GROWW_API_SECRET: ${status.growwApiSecret ? "CONFIGURED" : "MISSING"}`);
-  console.log(
-    `EMAIL_OTP: ${status.emailOtpConfigured ? "CONFIGURED (" + status.emailOtpProvider + ")" : "MISSING"}`,
-  );
-  console.log(
-    `SMS_OTP: ${status.smsOtpConfigured ? "CONFIGURED (" + status.smsOtpProvider + ")" : "MISSING"}`,
-  );
+  printSafeStatusReport();
 }

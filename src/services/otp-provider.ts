@@ -22,6 +22,8 @@ import {
   type OtpLifecycleState,
 } from "./otp-engine-server";
 
+export type { OtpChannel };
+
 export interface OtpDeliveryResult {
   success: boolean;
   destinationMasked: string;

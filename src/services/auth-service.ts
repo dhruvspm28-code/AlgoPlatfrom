@@ -20,6 +20,7 @@ import {
   maskPhone,
   isDemoAccount,
   type OtpDeliveryResult,
+  type OtpChannel,
 } from "./otp-provider";
 
 export interface UserSession {
@@ -808,6 +809,7 @@ class AuthService {
     broker?: string;
     brokerClientId?: string;
     dematUcc?: string;
+    channel?: "EMAIL" | "SMS";
   }): Promise<{ success: boolean; message: string; channel?: "EMAIL" | "SMS" }> {
     if (!input.name || input.name.trim().length < 2) {
       return { success: false, message: "Enter your full name." };
@@ -840,10 +842,14 @@ class AuthService {
       return { success: false, message: "An account with this mobile number already exists." };
     }
 
-    // Dispatch verification OTP to email
-    const otpRes = await otpProvider.sendOtp(input.email, "EMAIL", {
+    // Dispatch verification OTP to selected channel (default EMAIL)
+    const channel: OtpChannel = input.channel || "EMAIL";
+    const dest = channel === "SMS" ? cleanPhone : input.email;
+    const masked = channel === "SMS" ? maskPhone(cleanPhone) : maskEmail(input.email);
+
+    const otpRes = await otpProvider.sendOtp(dest, channel, {
       purpose: "REGISTRATION",
-      isDemo: isDemoAccount(input.email),
+      isDemo: isDemoAccount(dest),
     });
     if (!otpRes.success) {
       return { success: false, message: otpRes.message };
@@ -852,13 +858,13 @@ class AuthService {
     this.recordActivity(
       "OTP_REQUESTED",
       "SUCCESS",
-      `Registration verification OTP sent to ${maskEmail(input.email)}`,
+      `Registration verification OTP sent to ${masked}`,
     );
 
     return {
       success: true,
-      channel: "EMAIL",
-      message: `Verification code sent to ${maskEmail(input.email)}`,
+      channel,
+      message: `Verification code sent to ${masked}`,
     };
   }
 
@@ -878,7 +884,13 @@ class AuthService {
     brokerClientId?: string;
     dematUcc?: string;
   }): Promise<{ success: boolean; user?: UserProfile; message: string }> {
-    const verifyRes = await otpProvider.verifyOtp(input.email, input.otp);
+    let verifyRes = await otpProvider.verifyOtp(input.email, input.otp);
+    if (!verifyRes.success && input.phone) {
+      const phoneRes = await otpProvider.verifyOtp(this.normalizePhone(input.phone), input.otp);
+      if (phoneRes.success) {
+        verifyRes = phoneRes;
+      }
+    }
     if (!verifyRes.success) {
       this.recordActivity("OTP_FAILED", "FAILED", "Registration OTP verification failed");
       return { success: false, message: verifyRes.message };
@@ -1006,8 +1018,9 @@ class AuthService {
     );
 
     // MANDATORY OTP CHALLENGE: Send OTP to user's registered contact
-    const channel = user.email ? "EMAIL" : "SMS";
-    const dest = channel === "EMAIL" ? user.email : user.phone;
+    const isPhoneLogin = !identifier.includes("@") && this.normalizePhone(identifier).length >= 10;
+    const channel: OtpChannel = isPhoneLogin ? "SMS" : user.email ? "EMAIL" : "SMS";
+    const dest = channel === "SMS" ? user.phone : user.email || user.phone;
     const otpResult = await otpProvider.sendOtp(dest, channel, {
       purpose: "LOGIN",
       isDemo: isDemoAccount(dest) || isDemoAccount(identifier),
@@ -1045,8 +1058,13 @@ class AuthService {
       return { success: false, message: "Invalid or expired verification code." };
     }
 
-    const dest = user.email || user.phone;
-    const verifyRes = await otpProvider.verifyOtp(dest, otp);
+    const isPhoneLogin = !identifier.includes("@") && this.normalizePhone(identifier).length >= 10;
+    const primaryDest = isPhoneLogin ? user.phone : user.email || user.phone;
+    let verifyRes = await otpProvider.verifyOtp(primaryDest, otp);
+    if (!verifyRes.success && user.phone && primaryDest !== user.phone) {
+      const phoneRes = await otpProvider.verifyOtp(user.phone, otp);
+      if (phoneRes.success) verifyRes = phoneRes;
+    }
 
     if (!verifyRes.success) {
       this.recordActivity(
@@ -1089,8 +1107,9 @@ class AuthService {
       };
     }
 
-    const channel = user.email ? "EMAIL" : "SMS";
-    const dest = channel === "EMAIL" ? user.email : user.phone;
+    const isPhoneLogin = !identifier.includes("@") && this.normalizePhone(identifier).length >= 10;
+    const channel: OtpChannel = isPhoneLogin ? "SMS" : user.email ? "EMAIL" : "SMS";
+    const dest = channel === "SMS" ? user.phone : user.email || user.phone;
     const otpResult = await otpProvider.sendOtp(dest, channel, {
       purpose: "LOGIN",
       isDemo: isDemoAccount(dest) || isDemoAccount(identifier),
@@ -1130,8 +1149,13 @@ class AuthService {
       return { success: false, message: "Invalid or expired verification code." };
     }
 
-    const dest = user.email || user.phone;
-    const verifyRes = await otpProvider.verifyOtp(dest, otp);
+    const isPhoneLogin = !identifier.includes("@") && this.normalizePhone(identifier).length >= 10;
+    const primaryDest = isPhoneLogin ? user.phone : user.email || user.phone;
+    let verifyRes = await otpProvider.verifyOtp(primaryDest, otp);
+    if (!verifyRes.success && user.phone && primaryDest !== user.phone) {
+      const phoneRes = await otpProvider.verifyOtp(user.phone, otp);
+      if (phoneRes.success) verifyRes = phoneRes;
+    }
 
     if (!verifyRes.success) {
       this.recordActivity(
@@ -1178,8 +1202,9 @@ class AuthService {
       };
     }
 
-    const dest = user.email || user.phone;
-    const channel = user.email ? "EMAIL" : "SMS";
+    const isPhoneLogin = !identifier.includes("@") && this.normalizePhone(identifier).length >= 10;
+    const channel: OtpChannel = isPhoneLogin ? "SMS" : user.email ? "EMAIL" : "SMS";
+    const dest = channel === "SMS" ? user.phone : user.email || user.phone;
     const otpResult = await otpProvider.sendOtp(dest, channel, {
       purpose: "RESET_PASSWORD",
       isDemo: isDemoAccount(dest) || isDemoAccount(identifier),
@@ -1232,8 +1257,13 @@ class AuthService {
       return { success: false, message: "Invalid or expired verification code." };
     }
 
-    const dest = user.email || user.phone;
-    const verifyRes = await otpProvider.verifyOtp(dest, otp);
+    const isPhoneLogin = !identifier.includes("@") && this.normalizePhone(identifier).length >= 10;
+    const primaryDest = isPhoneLogin ? user.phone : user.email || user.phone;
+    let verifyRes = await otpProvider.verifyOtp(primaryDest, otp);
+    if (!verifyRes.success && user.phone && primaryDest !== user.phone) {
+      const phoneRes = await otpProvider.verifyOtp(user.phone, otp);
+      if (phoneRes.success) verifyRes = phoneRes;
+    }
     if (!verifyRes.success) {
       return { success: false, message: verifyRes.message };
     }

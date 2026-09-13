@@ -45,6 +45,7 @@ import {
   maskPhone,
   isDemoAccount,
 } from "../src/services/otp-provider";
+import { getSmsProviderSafeStatus } from "../src/services/safe-env";
 
 describe("SmartQuant Edge Real OTP Delivery Architecture", () => {
   beforeEach(() => {
@@ -543,5 +544,93 @@ describe("SmartQuant Edge Real OTP Delivery Architecture", () => {
     // Verify demo token
     const verifyDemo = await serverOtpEngine.verifyOtp("ananya@meridiancap.in", demoToken!);
     assert.equal(verifyDemo.success, true);
+  });
+
+  test("19. should handle MSG91 API error payload and prevent false 'OTP sent' claims", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = async () => {
+        return new Response(
+          JSON.stringify({ type: "error", message: "Invalid Template ID or Insufficient Balance" }),
+          { status: 200 },
+        );
+      };
+
+      const msg91 = new Msg91SmsProvider({
+        authKey: "mock_auth_key_1234567890",
+        templateId: "mock_template_123",
+      });
+
+      const res = await msg91.sendSms({
+        phone: "9876543210",
+        otp: "123456",
+        purpose: "AUTHENTICATION",
+        expiresInMinutes: 5,
+      });
+
+      assert.equal(res.success, false, "Must return false when MSG91 returns error payload");
+      assert.match(res.error || "", /rejected|error/i);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("20. Safe Provider Status Check reports only status without leaking credentials", () => {
+    const status = getSmsProviderSafeStatus();
+    assert.equal(status.provider, "MSG91");
+    assert.ok(status.configuration === "CONFIGURED" || status.configuration === "MISSING");
+    assert.ok(status.delivery === "READY" || status.delivery === "UNAVAILABLE");
+
+    // Zero credential leakage check
+    const statusStr = JSON.stringify(status);
+    assert.doesNotMatch(statusStr, /authKey/i);
+    assert.doesNotMatch(statusStr, /apiKey/i);
+    assert.doesNotMatch(statusStr, /secret/i);
+    assert.doesNotMatch(statusStr, /token/i);
+  });
+
+  test("21. Controlled MSG91 real delivery simulation accepts OTP and enforces security guarantees", async () => {
+    const originalFetch = globalThis.fetch;
+    let dispatchedOtp = "";
+    try {
+      globalThis.fetch = async (_input, init) => {
+        const body = JSON.parse(String(init?.body || "{}"));
+        dispatchedOtp = body.otp;
+        return new Response(JSON.stringify({ type: "success", message: "OTP sent successfully" }), {
+          status: 200,
+        });
+      };
+
+      const msg91 = new Msg91SmsProvider({
+        authKey: "valid_mock_auth_key_1234567890",
+        templateId: "valid_template_999",
+      });
+
+      // Inject provider into serverOtpEngine
+      serverOtpEngine._setProviders(new MockEmailProvider(), msg91);
+
+      const target = "9823456789";
+      const res = await serverOtpEngine.dispatchOtp({
+        target,
+        channel: "SMS",
+      });
+
+      assert.equal(res.success, true);
+      assert.equal(res.state, "OTP_SENT");
+      assert.equal(res.resendCooldownSeconds, 45);
+      assert.equal(res.expiresInSeconds, 300);
+
+      // Verify the OTP accepted by MSG91 is valid and single-use
+      assert.ok(dispatchedOtp.length === 6);
+      const verifyRes = await serverOtpEngine.verifyOtp(target, dispatchedOtp);
+      assert.equal(verifyRes.success, true);
+      assert.equal(verifyRes.state, "OTP_VERIFIED");
+
+      // Single-use: cannot be reused
+      const secondVerify = await serverOtpEngine.verifyOtp(target, dispatchedOtp);
+      assert.equal(secondVerify.success, false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

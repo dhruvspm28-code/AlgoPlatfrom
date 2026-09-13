@@ -438,9 +438,11 @@ export class Msg91SmsProvider implements SmsOtpProvider {
   private authKey: string;
   private templateId: string;
 
-  constructor() {
-    this.authKey = process.env.MSG91_AUTH_KEY || process.env.SMS_OTP_API_KEY || "";
-    this.templateId = process.env.MSG91_TEMPLATE_ID || process.env.SMS_OTP_SENDER_ID || "";
+  constructor(options?: { authKey?: string; templateId?: string }) {
+    this.authKey =
+      options?.authKey || process.env.MSG91_AUTH_KEY || process.env.SMS_OTP_API_KEY || "";
+    this.templateId =
+      options?.templateId || process.env.MSG91_TEMPLATE_ID || process.env.SMS_OTP_SENDER_ID || "";
   }
 
   public isConfigured(): boolean {
@@ -471,11 +473,17 @@ export class Msg91SmsProvider implements SmsOtpProvider {
           template_id: this.templateId,
           mobile,
           otp: params.otp,
+          otp_expiry: params.expiresInMinutes,
         }),
       });
 
       if (!response.ok) {
         return { success: false, error: `MSG91 HTTP error ${response.status}` };
+      }
+
+      const data = (await response.json().catch(() => ({}))) as { type?: string; message?: string };
+      if (data.type === "error") {
+        return { success: false, error: "MSG91 delivery request rejected" };
       }
 
       return { success: true, messageId: "msg91_sent" };
@@ -659,6 +667,34 @@ export class ServerOtpEngine {
     return demoIdentifiers.some((d) => norm.includes(d) || d.includes(norm));
   }
 
+  private recordDemoToken(target: string, rawOtp: string): void {
+    const norm = target.trim().toLowerCase();
+    const digits = target.replace(/[^0-9]/g, "");
+    this.demoTokenStore.set(norm, rawOtp);
+    if (digits) this.demoTokenStore.set(digits, rawOtp);
+
+    if (digits.includes("9876543210") || norm.includes("ananya") || norm.includes("7f42k9")) {
+      this.demoTokenStore.set("sqe-7f42k9", rawOtp);
+      this.demoTokenStore.set("ananya@meridiancap.in", rawOtp);
+      this.demoTokenStore.set("9876543210", rawOtp);
+      this.demoTokenStore.set("+91 98765 43210", rawOtp);
+    } else if (
+      digits.includes("9811122233") ||
+      norm.includes("shetty") ||
+      norm.includes("8k92m4")
+    ) {
+      this.demoTokenStore.set("sqe-8k92m4", rawOtp);
+      this.demoTokenStore.set("vikram@shettyalgo.in", rawOtp);
+      this.demoTokenStore.set("9811122233", rawOtp);
+      this.demoTokenStore.set("+91 98111 22233", rawOtp);
+    } else if (digits.includes("9899988776") || norm.includes("menon") || norm.includes("3n56p8")) {
+      this.demoTokenStore.set("sqe-3n56p8", rawOtp);
+      this.demoTokenStore.set("priya@menonquant.in", rawOtp);
+      this.demoTokenStore.set("9899988776", rawOtp);
+      this.demoTokenStore.set("+91 98999 88776", rawOtp);
+    }
+  }
+
   /**
    * Mask email for safe client transmission (e.g. v***@gmail.com)
    */
@@ -777,11 +813,11 @@ export class ServerOtpEngine {
     if (isDemo && !isMock) {
       deliverySucceeded = true;
       providerName = "DemoEngine";
-      this.demoTokenStore.set(normKey, rawOtp);
+      this.recordDemoToken(normKey, rawOtp);
     } else if (isTestMode && !isMock) {
       deliverySucceeded = true;
       providerName = "MockTestEngine";
-      this.demoTokenStore.set(normKey, rawOtp);
+      this.recordDemoToken(normKey, rawOtp);
     } else {
       const expiresInMinutes = Math.floor(this.expirySeconds / 60);
 
@@ -806,7 +842,7 @@ export class ServerOtpEngine {
       }
 
       if (isDemo || isMock || isTestMode) {
-        this.demoTokenStore.set(normKey, rawOtp);
+        this.recordDemoToken(normKey, rawOtp);
       }
     }
 

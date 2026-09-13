@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node --env-file=.env ./node_modules/vite/bin/vite.js dev",
     "check-env": "node --env-file=.env -e \"import('./src/services/safe-env.ts').then(m => { const s = m.checkEnvConfigured(); console.log('GROWW_API_KEY: ' + (s.growwApiKey ? 'CONFIGURED' : 'MISSING')); console.log('GROWW_API_SECRET: ' + (s.growwApiSecret ? 'CONFIGURED' : 'MISSING')); });\"",
+    "check-sms": "node --env-file=.env -e \"import('./src/services/safe-env.ts').then(m => m.printSafeStatusReport());\"",
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "preview": "vite preview",
