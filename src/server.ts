@@ -64,6 +64,59 @@ export default {
         });
       }
 
+      if (url.pathname === "/api/auth/otp/send" && request.method === "POST") {
+        const { serverOtpEngine } = await import("./services/otp-engine-server");
+        const body = (await request.json()) as {
+          target?: string;
+          channel?: "EMAIL" | "SMS";
+          purpose?: string;
+          isDemo?: boolean;
+        };
+        if (!body.target || !body.channel) {
+          return new Response(
+            JSON.stringify({ success: false, message: "Target and channel are required." }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+        }
+        const result = await serverOtpEngine.dispatchOtp({
+          target: body.target,
+          channel: body.channel,
+          purpose: body.purpose,
+          isDemo: body.isDemo,
+        });
+        return new Response(JSON.stringify(result), {
+          status: 200,
+          headers: { "content-type": "application/json", "cache-control": "no-store" },
+        });
+      }
+
+      if (url.pathname === "/api/auth/otp/verify" && request.method === "POST") {
+        const { serverOtpEngine } = await import("./services/otp-engine-server");
+        const body = (await request.json()) as { target?: string; code?: string };
+        if (!body.target || !body.code) {
+          return new Response(
+            JSON.stringify({
+              success: false,
+              message: "Target and verification code are required.",
+            }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+        }
+        const result = serverOtpEngine.verifyOtp(body.target, body.code);
+        return new Response(JSON.stringify(result), {
+          status: 200,
+          headers: { "content-type": "application/json", "cache-control": "no-store" },
+        });
+      }
+
+      if (url.pathname === "/api/auth/otp/status") {
+        const { serverOtpEngine } = await import("./services/otp-engine-server");
+        return new Response(JSON.stringify(serverOtpEngine.getProviderStatus()), {
+          status: 200,
+          headers: { "content-type": "application/json", "cache-control": "no-store" },
+        });
+      }
+
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);
       return await normalizeCatastrophicSsrResponse(response);

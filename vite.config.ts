@@ -19,7 +19,7 @@ const growwServerPlugin: Plugin = {
         console.error("Groww Feed server startup error:", err);
       });
 
-      server.middlewares.use((req, res, next) => {
+      server.middlewares.use(async (req, res, next) => {
         const url = req.url || "";
         if (url === "/api/market-data/status" || url.startsWith("/api/market-data/status?")) {
           serverMarketData.handleStatus(res);
@@ -33,6 +33,57 @@ const growwServerPlugin: Plugin = {
           serverMarketData.handleStream(req, res);
           return;
         }
+
+        if (url === "/api/auth/otp/status") {
+          const { serverOtpEngine } = await import("./src/services/otp-engine-server");
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify(serverOtpEngine.getProviderStatus()));
+          return;
+        }
+
+        if (url === "/api/auth/otp/send" && req.method === "POST") {
+          const { serverOtpEngine } = await import("./src/services/otp-engine-server");
+          let data = "";
+          req.on("data", (c) => (data += c));
+          req.on("end", async () => {
+            try {
+              const body = JSON.parse(data || "{}");
+              const result = await serverOtpEngine.dispatchOtp({
+                target: body.target,
+                channel: body.channel,
+                purpose: body.purpose,
+                isDemo: body.isDemo,
+              });
+              res.setHeader("Content-Type", "application/json");
+              res.end(JSON.stringify(result));
+            } catch {
+              res.statusCode = 400;
+              res.setHeader("Content-Type", "application/json");
+              res.end(JSON.stringify({ success: false, message: "Invalid JSON payload" }));
+            }
+          });
+          return;
+        }
+
+        if (url === "/api/auth/otp/verify" && req.method === "POST") {
+          const { serverOtpEngine } = await import("./src/services/otp-engine-server");
+          let data = "";
+          req.on("data", (c) => (data += c));
+          req.on("end", async () => {
+            try {
+              const body = JSON.parse(data || "{}");
+              const result = serverOtpEngine.verifyOtp(body.target, body.code);
+              res.setHeader("Content-Type", "application/json");
+              res.end(JSON.stringify(result));
+            } catch {
+              res.statusCode = 400;
+              res.setHeader("Content-Type", "application/json");
+              res.end(JSON.stringify({ success: false, message: "Invalid JSON payload" }));
+            }
+          });
+          return;
+        }
+
         next();
       });
     });

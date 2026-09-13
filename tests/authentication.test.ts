@@ -496,4 +496,139 @@ describe("SmartQuant Edge First-Party Authentication Engine", () => {
     assert.equal(remainingSessions[0].id, sess2Id);
     assert.ok(!remainingSessions.some((s) => s.id === sess1Id));
   });
+
+  test("24. should record trading account eligibility and set VERIFICATION_PENDING for supported broker (Groww/Dhan)", async () => {
+    const email = "demat.quant@example.com";
+    const phone = "+91 99887 76655";
+
+    // Initiate registration with Groww broker and valid UCC
+    const initRes = await authService.registerInitiate({
+      name: "Rohan Deshmukh",
+      email,
+      phone,
+      password: "StrongPassword@99",
+      confirmPassword: "StrongPassword@99",
+      hasDemat: true,
+      selectedBroker: "groww",
+      dematUcc: "GRW-982143",
+    });
+
+    assert.equal(initRes.success, true);
+
+    const testOtp = otpProvider._getTestToken(email)!;
+    assert.ok(testOtp);
+
+    // Complete registration
+    const completeRes = await authService.registerComplete({
+      name: "Rohan Deshmukh",
+      email,
+      phone,
+      password: "StrongPassword@99",
+      otp: testOtp,
+      hasDemat: true,
+      selectedBroker: "groww",
+      dematUcc: "GRW-982143",
+    });
+
+    assert.equal(completeRes.success, true);
+    assert.ok(completeRes.user?.tradingAccount);
+    assert.equal(completeRes.user.tradingAccount.broker, "GROWW");
+    assert.equal(completeRes.user.tradingAccount.brokerLabel, "Groww");
+    assert.equal(completeRes.user.tradingAccount.dematUcc, "GRW-982143");
+    assert.equal(completeRes.user.tradingAccount.hasDemat, true);
+    // Crucial rule: Never falsely claim Demat is verified; must be VERIFICATION_PENDING
+    assert.equal(completeRes.user.tradingAccount.status, "VERIFICATION_PENDING");
+  });
+
+  test("25. should set VERIFICATION_UNAVAILABLE when user selects broker without automatic verification", async () => {
+    const email = "angel.quant@example.com";
+    const phone = "+91 99112 23344";
+
+    const initRes = await authService.registerInitiate({
+      name: "Karan Johar",
+      email,
+      phone,
+      password: "StrongPassword@99",
+      confirmPassword: "StrongPassword@99",
+      hasDemat: true,
+      selectedBroker: "angelone",
+      dematUcc: "ANGEL-109234",
+    });
+
+    assert.equal(initRes.success, true);
+    const testOtp = otpProvider._getTestToken(email)!;
+
+    const completeRes = await authService.registerComplete({
+      name: "Karan Johar",
+      email,
+      phone,
+      password: "StrongPassword@99",
+      otp: testOtp,
+      hasDemat: true,
+      selectedBroker: "angelone",
+      dematUcc: "ANGEL-109234",
+    });
+
+    assert.equal(completeRes.success, true);
+    assert.ok(completeRes.user?.tradingAccount);
+    assert.equal(completeRes.user.tradingAccount.status, "VERIFICATION_UNAVAILABLE");
+    assert.match(
+      completeRes.user.tradingAccount.verificationNote || "",
+      /Automatic verification unavailable for Angel One/i,
+    );
+  });
+
+  test("26. should set NOT_VERIFIED if user does not declare an active Demat account", async () => {
+    const email = "nodemat@example.com";
+    const phone = "+91 91234 56780";
+
+    const initRes = await authService.registerInitiate({
+      name: "Sneha Patel",
+      email,
+      phone,
+      password: "StrongPassword@99",
+      confirmPassword: "StrongPassword@99",
+      hasDemat: false,
+    });
+
+    assert.equal(initRes.success, true);
+    const testOtp = otpProvider._getTestToken(email)!;
+
+    const completeRes = await authService.registerComplete({
+      name: "Sneha Patel",
+      email,
+      phone,
+      password: "StrongPassword@99",
+      otp: testOtp,
+      hasDemat: false,
+    });
+
+    assert.equal(completeRes.success, true);
+    assert.ok(completeRes.user?.tradingAccount);
+    assert.equal(completeRes.user.tradingAccount.status, "NOT_VERIFIED");
+    assert.equal(completeRes.user.tradingAccount.hasDemat, false);
+  });
+
+  test("27. security check: zero broker passwords, PINs, or broker OTPs are ever stored", () => {
+    const users = authService.getAllUsers();
+    users.forEach((u) => {
+      const uAny = u as Record<string, unknown>;
+      assert.equal(
+        uAny.brokerPassword,
+        undefined,
+        "Broker password must never exist in user model",
+      );
+      assert.equal(uAny.brokerPin, undefined, "Broker PIN must never exist in user model");
+      assert.equal(uAny.brokerOtp, undefined, "Broker OTP must never exist in user model");
+      assert.equal(uAny.apiSecret, undefined, "API secret must never be stored on user model");
+
+      if (u.tradingAccount) {
+        const taAny = u.tradingAccount as Record<string, unknown>;
+        assert.equal(taAny.brokerPassword, undefined);
+        assert.equal(taAny.pin, undefined);
+        assert.equal(taAny.otp, undefined);
+        assert.equal(taAny.secret, undefined);
+      }
+    });
+  });
 });

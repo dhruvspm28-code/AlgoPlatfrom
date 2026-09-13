@@ -277,6 +277,28 @@ export function ProfilePage() {
               <ShieldCheck className="h-3 w-3" /> SECURE
             </span>
           </div>
+          <div className="rounded-lg border border-border/70 bg-surface-2/40 px-3 py-1.5 text-xs">
+            <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider block">
+              Trading Account Status
+            </span>
+            {user.tradingAccount?.status === "VERIFIED" ? (
+              <span className="font-bold text-bull flex items-center gap-1">
+                <CheckCircle2 className="h-3 w-3" /> VERIFIED
+              </span>
+            ) : user.tradingAccount?.status === "VERIFICATION_PENDING" ? (
+              <span className="font-bold text-amber-400 flex items-center gap-1">
+                <Clock className="h-3 w-3" /> PENDING
+              </span>
+            ) : user.tradingAccount?.status === "VERIFICATION_UNAVAILABLE" ? (
+              <span className="font-bold text-muted-foreground flex items-center gap-1">
+                <AlertTriangle className="h-3 w-3" /> UNAVAILABLE
+              </span>
+            ) : (
+              <span className="font-bold text-bear flex items-center gap-1">
+                <AlertCircle className="h-3 w-3" /> NOT VERIFIED
+              </span>
+            )}
+          </div>
           <Button
             size="sm"
             variant="outline"
@@ -437,6 +459,123 @@ export function ProfilePage() {
                 or TOTP secrets. Trading execution and market data are brokered over server-side
                 sandboxed adapters.
               </div>
+            </div>
+          </div>
+
+          {/* SECTION 4: TRADING ACCOUNT & DEMAT ELIGIBILITY CARD */}
+          <div className="rounded-xl border border-border bg-surface p-5 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border/60 pb-3">
+              <div>
+                <h2 className="text-xs font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+                  <Building2 className="h-4 w-4 text-primary" /> Trading Account & Demat Eligibility
+                </h2>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Linked Indian broker account and unique client code (UCC) registration status.
+                </p>
+              </div>
+              <div>
+                {user.tradingAccount?.status === "VERIFIED" ? (
+                  <span className="rounded bg-bull/10 border border-bull/30 px-3 py-1 text-xs font-bold text-bull flex items-center gap-1.5">
+                    <CheckCircle2 className="h-3.5 w-3.5" /> ✓ Trading Account Verified
+                  </span>
+                ) : user.tradingAccount?.status === "VERIFICATION_PENDING" ? (
+                  <span className="rounded bg-amber-500/10 border border-amber-500/30 px-3 py-1 text-xs font-bold text-amber-400 flex items-center gap-1.5">
+                    <Clock className="h-3.5 w-3.5" /> VERIFICATION PENDING
+                  </span>
+                ) : user.tradingAccount?.status === "VERIFICATION_UNAVAILABLE" ? (
+                  <span className="rounded bg-muted border border-border px-3 py-1 text-xs font-bold text-muted-foreground flex items-center gap-1.5">
+                    <AlertTriangle className="h-3.5 w-3.5" /> VERIFICATION UNAVAILABLE
+                  </span>
+                ) : (
+                  <span className="rounded bg-bear/10 border border-bear/30 px-3 py-1 text-xs font-bold text-bear flex items-center gap-1.5">
+                    <AlertCircle className="h-3.5 w-3.5" /> NOT VERIFIED
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-xs num">
+              <div className="rounded-lg border border-border bg-surface-2/40 p-3">
+                <span className="text-muted-foreground text-[10px] uppercase font-semibold block">
+                  Declared Broker
+                </span>
+                <p className="font-bold text-foreground text-sm mt-1">
+                  {user.tradingAccount?.brokerLabel || "None Selected"}
+                </p>
+                <span className="text-[10px] text-muted-foreground mt-0.5 block">
+                  Indian Depository Participant
+                </span>
+              </div>
+
+              <div className="rounded-lg border border-border bg-surface-2/40 p-3">
+                <span className="text-muted-foreground text-[10px] uppercase font-semibold block">
+                  Broker Client ID (UCC)
+                </span>
+                <p className="font-mono font-bold text-foreground text-sm mt-1">
+                  {user.tradingAccount?.dematUcc || "Unassigned"}
+                </p>
+                <span className="text-[10px] text-muted-foreground mt-0.5 block">
+                  Exchange Registered Code
+                </span>
+              </div>
+
+              <div className="rounded-lg border border-border bg-surface-2/40 p-3">
+                <span className="text-muted-foreground text-[10px] uppercase font-semibold block">
+                  Demat Declared
+                </span>
+                <p className="font-bold text-bull text-sm mt-1">
+                  {user.tradingAccount?.hasDemat ? "Yes (Active Account)" : "No"}
+                </p>
+                <span className="text-[10px] text-muted-foreground mt-0.5 block">
+                  CDSL / NSDL Holding
+                </span>
+              </div>
+
+              <div className="rounded-lg border border-border bg-surface-2/40 p-3">
+                <span className="text-muted-foreground text-[10px] uppercase font-semibold block">
+                  Live Features State
+                </span>
+                <p
+                  className={`text-xs font-bold mt-1 ${user.tradingAccount?.status === "VERIFIED" ? "text-bull" : "text-amber-400"}`}
+                >
+                  {user.tradingAccount?.status === "VERIFIED"
+                    ? "FULL ACCESS"
+                    : "SANDBOX / RESTRICTED"}
+                </p>
+                <span className="text-[10px] text-muted-foreground mt-0.5 block">
+                  Broker-linked APIs
+                </span>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-border/70 bg-surface-2/30 p-3 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="text-muted-foreground leading-relaxed">
+                {user.tradingAccount?.status === "VERIFIED" ? (
+                  <span className="text-bull font-semibold flex items-center gap-1.5">
+                    <CheckCircle2 className="h-4 w-4 shrink-0" /> Trading account verified for live
+                    execution and market-data streaming.
+                  </span>
+                ) : (
+                  <span className="text-amber-400 font-medium flex items-center gap-1.5">
+                    <AlertCircle className="h-4 w-4 shrink-0" /> Trading account verification
+                    required for broker-linked features.
+                  </span>
+                )}
+                {user.tradingAccount?.verificationNote && (
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    {user.tradingAccount.verificationNote}
+                  </p>
+                )}
+              </div>
+
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setActiveTab("broker")}
+                className="text-xs h-8 font-semibold shrink-0 cursor-pointer"
+              >
+                Manage Broker Gateway →
+              </Button>
             </div>
           </div>
         </div>

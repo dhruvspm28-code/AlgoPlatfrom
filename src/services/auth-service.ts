@@ -14,7 +14,13 @@
 
 import { realtimeBus } from "./realtime-bus";
 import { auditLogService } from "./audit-log-service";
-import { otpProvider, maskEmail, maskPhone, type OtpDeliveryResult } from "./otp-provider";
+import {
+  otpProvider,
+  maskEmail,
+  maskPhone,
+  isDemoAccount,
+  type OtpDeliveryResult,
+} from "./otp-provider";
 
 export interface UserSession {
   id: string;
@@ -57,7 +63,9 @@ export type SecurityAuditEventType =
   | "SESSION_REVOKED"
   | "DEVICE_TRUSTED"
   | "DEVICE_REVOKED"
-  | "LOGOUT";
+  | "LOGOUT"
+  | "TRADING_ACCOUNT_VERIFIED"
+  | "TRADING_ACCOUNT_UPDATED";
 
 export interface LoginActivity {
   id: string;
@@ -80,6 +88,30 @@ export interface KycData {
   notes?: string;
 }
 
+export type TradingAccountStatus =
+  | "NOT_VERIFIED"
+  | "VERIFICATION_PENDING"
+  | "VERIFIED"
+  | "VERIFICATION_FAILED"
+  | "VERIFICATION_UNAVAILABLE";
+
+export type SupportedBroker = "GROWW" | "DHAN" | "FYERS" | "UPSTOX" | "ANGEL_ONE" | "OTHER";
+
+export interface TradingAccountDetails {
+  status: TradingAccountStatus;
+  hasDematDeclared: boolean;
+  hasDemat?: boolean;
+  selectedBroker?: SupportedBroker;
+  broker?: SupportedBroker;
+  brokerLabel?: string;
+  brokerClientId?: string; // Client ID / UCC only. NEVER store passwords, PINs, or broker OTPs.
+  dematUcc?: string;
+  verificationMethod?: "AUTOMATIC_UCC" | "SERVER_GATEWAY" | "MANUAL_PENDING" | "UNAVAILABLE";
+  verificationTimestamp?: string;
+  verificationMessage?: string;
+  verificationNote?: string;
+}
+
 export interface UserProfile {
   id: string;
   userId: string; // Unique SmartQuant User ID (e.g., SQE-7F42K9)
@@ -95,6 +127,7 @@ export interface UserProfile {
   allowMultipleDevices: boolean;
   trustedDevices: TrustedDevice[];
   kyc: KycData;
+  tradingAccount?: TradingAccountDetails;
   createdAt: string;
 }
 
@@ -207,6 +240,8 @@ export interface DemoAccountInfo {
   plan: "Free" | "Pro" | "Enterprise";
   description: string;
   passwordHint: string;
+  brokerLabel: string;
+  tradingAccountStatus: TradingAccountStatus;
 }
 
 export const DEMO_ACCOUNTS: DemoAccountInfo[] = [
@@ -219,6 +254,8 @@ export const DEMO_ACCOUNTS: DemoAccountInfo[] = [
     plan: "Pro",
     description: "Lead Quantitative Trader · Systematic F&O & Momentum Desk",
     passwordHint: "Password@123",
+    brokerLabel: "DhanHQ Verified",
+    tradingAccountStatus: "VERIFIED",
   },
   {
     name: "Vikram Shetty",
@@ -229,6 +266,8 @@ export const DEMO_ACCOUNTS: DemoAccountInfo[] = [
     plan: "Enterprise",
     description: "Risk Officer & Admin · Exposure Caps & Kill Switch Controls",
     passwordHint: "Password@123",
+    brokerLabel: "Groww Gateway Verified",
+    tradingAccountStatus: "VERIFIED",
   },
   {
     name: "Priya Menon",
@@ -239,6 +278,8 @@ export const DEMO_ACCOUNTS: DemoAccountInfo[] = [
     plan: "Free",
     description: "Retail Algorithmic Trader · Breakout Scanner & Trend Models",
     passwordHint: "Password@123",
+    brokerLabel: "Groww (Pending)",
+    tradingAccountStatus: "VERIFICATION_PENDING",
   },
 ];
 
@@ -276,6 +317,15 @@ function createDefaultUsers(): UserProfile[] {
         verifiedAt: "2026-01-15T14:30:00.000Z",
         notes: "SEBI/KRA verified retail quantitative account",
       },
+      tradingAccount: {
+        status: "VERIFIED",
+        hasDematDeclared: true,
+        selectedBroker: "DHAN",
+        brokerClientId: "DHAN_10029",
+        verificationMethod: "SERVER_GATEWAY",
+        verificationTimestamp: "2026-08-01T10:00:00.000Z",
+        verificationMessage: "DhanHQ Trading & Demat Account Verified",
+      },
       createdAt: "2026-01-01T09:00:00.000Z",
     },
     {
@@ -309,6 +359,15 @@ function createDefaultUsers(): UserProfile[] {
         verifiedAt: "2026-02-01T15:00:00.000Z",
         notes: "Institutional risk governance account",
       },
+      tradingAccount: {
+        status: "VERIFIED",
+        hasDematDeclared: true,
+        selectedBroker: "GROWW",
+        brokerClientId: "GROWW_8499B",
+        verificationMethod: "SERVER_GATEWAY",
+        verificationTimestamp: "2026-08-10T11:00:00.000Z",
+        verificationMessage: "Groww Trade Gateway Account Verified",
+      },
       createdAt: "2026-02-01T09:00:00.000Z",
     },
     {
@@ -332,6 +391,16 @@ function createDefaultUsers(): UserProfile[] {
         submittedAt: "2026-03-01T10:00:00.000Z",
         verifiedAt: "2026-03-01T14:00:00.000Z",
         notes: "Retail algorithmic trader account",
+      },
+      tradingAccount: {
+        status: "VERIFICATION_PENDING",
+        hasDematDeclared: true,
+        selectedBroker: "GROWW",
+        brokerClientId: "GRW99410",
+        verificationMethod: "MANUAL_PENDING",
+        verificationTimestamp: "2026-03-01T10:00:00.000Z",
+        verificationMessage:
+          "Demat eligibility declared. Broker gateway binding pending in profile settings.",
       },
       createdAt: "2026-03-01T09:00:00.000Z",
     },
@@ -562,6 +631,168 @@ class AuthService {
     return [...this.loginActivities];
   }
 
+  public getAllUsers(): UserProfile[] {
+    const unique = new Map<string, UserProfile>();
+    for (const u of this.userRegistry.values()) {
+      unique.set(u.userId, u);
+    }
+    return Array.from(unique.values());
+  }
+
+  /**
+   * Determine Trading Account / Demat eligibility and verification status.
+   * STRICT INTEGRITY RULE: Never marks an account as VERIFIED without true gateway handshake.
+   * Categorizes honestly into:
+   * - NOT_VERIFIED: Demat not declared or not provided
+   * - VERIFICATION_PENDING: Declared on supported gateway (Groww, Dhan) pending gateway session binding
+   * - VERIFICATION_UNAVAILABLE: Selected broker unsupported for automated verification
+   * - VERIFICATION_FAILED: Malformed UCC / Client ID format
+   * - VERIFIED: Authorized via active server gateway
+   */
+  public verifyTradingAccount(input: {
+    hasDematDeclared?: boolean;
+    hasDemat?: boolean;
+    selectedBroker?: string;
+    broker?: string;
+    brokerClientId?: string;
+    dematUcc?: string;
+  }): TradingAccountDetails {
+    const timestamp = new Date().toISOString();
+    const hasDemat =
+      input.hasDematDeclared !== undefined
+        ? Boolean(input.hasDematDeclared)
+        : Boolean(input.hasDemat);
+    const rawBroker = (input.selectedBroker || input.broker || "").trim().toUpperCase();
+
+    let normalizedBroker: SupportedBroker | undefined = undefined;
+    let brokerLabel = "Other Broker";
+
+    if (rawBroker === "GROWW") {
+      normalizedBroker = "GROWW";
+      brokerLabel = "Groww";
+    } else if (rawBroker === "DHAN") {
+      normalizedBroker = "DHAN";
+      brokerLabel = "Dhan";
+    } else if (rawBroker === "FYERS") {
+      normalizedBroker = "FYERS";
+      brokerLabel = "FYERS";
+    } else if (rawBroker === "UPSTOX") {
+      normalizedBroker = "UPSTOX";
+      brokerLabel = "Upstox";
+    } else if (rawBroker === "ANGEL_ONE" || rawBroker === "ANGELONE" || rawBroker === "ANGEL ONE") {
+      normalizedBroker = "ANGEL_ONE";
+      brokerLabel = "Angel One";
+    } else if (rawBroker) {
+      normalizedBroker = "OTHER";
+      brokerLabel = input.selectedBroker || input.broker || "Other Broker";
+    }
+
+    const rawId = (input.brokerClientId || input.dematUcc || "").trim();
+
+    if (!hasDemat) {
+      return {
+        status: "NOT_VERIFIED",
+        hasDematDeclared: false,
+        hasDemat: false,
+        selectedBroker: normalizedBroker,
+        broker: normalizedBroker,
+        brokerLabel,
+        brokerClientId: rawId || undefined,
+        dematUcc: rawId || undefined,
+        verificationMethod: "MANUAL_PENDING",
+        verificationMessage:
+          "Trading account verification required for broker-linked features. Operating in Simulated Paper Sandbox mode.",
+        verificationNote:
+          "Trading account verification required for broker-linked features. Operating in Simulated Paper Sandbox mode.",
+        verificationTimestamp: timestamp,
+      };
+    }
+
+    if (!normalizedBroker) {
+      return {
+        status: "NOT_VERIFIED",
+        hasDematDeclared: true,
+        hasDemat: true,
+        verificationMethod: "MANUAL_PENDING",
+        verificationMessage: "Please select your primary broker / trading platform.",
+        verificationNote: "Please select your primary broker / trading platform.",
+        verificationTimestamp: timestamp,
+      };
+    }
+
+    // Check supported brokers with live server gateways: Groww and Dhan
+    if (normalizedBroker === "GROWW" || normalizedBroker === "DHAN") {
+      if (!rawId) {
+        return {
+          status: "VERIFICATION_PENDING",
+          hasDematDeclared: true,
+          hasDemat: true,
+          selectedBroker: normalizedBroker,
+          broker: normalizedBroker,
+          brokerLabel,
+          verificationMethod: "MANUAL_PENDING",
+          verificationMessage:
+            "Demat eligibility declared. Enter your Broker Client ID / UCC to begin gateway verification.",
+          verificationNote:
+            "Demat eligibility declared. Enter your Broker Client ID / UCC to begin gateway verification.",
+          verificationTimestamp: timestamp,
+        };
+      }
+
+      // Validate UCC format (alphanumeric, 4 to 16 characters)
+      if (!/^[A-Za-z0-9_-]{4,16}$/.test(rawId)) {
+        return {
+          status: "VERIFICATION_FAILED",
+          hasDematDeclared: true,
+          hasDemat: true,
+          selectedBroker: normalizedBroker,
+          broker: normalizedBroker,
+          brokerLabel,
+          brokerClientId: rawId,
+          dematUcc: rawId,
+          verificationMethod: "AUTOMATIC_UCC",
+          verificationMessage:
+            "Invalid Client ID / UCC format. Must be 4 to 16 alphanumeric characters.",
+          verificationNote:
+            "Invalid Client ID / UCC format. Must be 4 to 16 alphanumeric characters.",
+          verificationTimestamp: timestamp,
+        };
+      }
+
+      // Valid UCC on supported gateway
+      return {
+        status: "VERIFICATION_PENDING",
+        hasDematDeclared: true,
+        hasDemat: true,
+        selectedBroker: normalizedBroker,
+        broker: normalizedBroker,
+        brokerLabel,
+        brokerClientId: rawId,
+        dematUcc: rawId,
+        verificationMethod: "AUTOMATIC_UCC",
+        verificationMessage: `Demat eligibility declared for ${brokerLabel}. Broker account verification pending gateway session binding in terminal profile.`,
+        verificationNote: `Demat eligibility declared for ${brokerLabel}. Broker account verification pending gateway session binding in terminal profile.`,
+        verificationTimestamp: timestamp,
+      };
+    }
+
+    // FYERS, UPSTOX, ANGEL_ONE, OTHER
+    return {
+      status: "VERIFICATION_UNAVAILABLE",
+      hasDematDeclared: true,
+      hasDemat: true,
+      selectedBroker: normalizedBroker,
+      broker: normalizedBroker,
+      brokerLabel,
+      brokerClientId: rawId || undefined,
+      dematUcc: rawId || undefined,
+      verificationMethod: "UNAVAILABLE",
+      verificationMessage: `Automatic verification unavailable for ${brokerLabel}. You can continue with eligibility declaration, but live broker-linked features will remain unavailable until your trading account is verified.`,
+      verificationNote: `Automatic verification unavailable for ${brokerLabel}. You can continue with eligibility declaration, but live broker-linked features will remain unavailable until your trading account is verified.`,
+      verificationTimestamp: timestamp,
+    };
+  }
+
   /**
    * STEP 1 of Registration: Validate details and send OTP
    */
@@ -571,6 +802,12 @@ class AuthService {
     phone: string;
     password: string;
     confirmPassword?: string;
+    hasDematDeclared?: boolean;
+    hasDemat?: boolean;
+    selectedBroker?: string;
+    broker?: string;
+    brokerClientId?: string;
+    dematUcc?: string;
   }): Promise<{ success: boolean; message: string; channel?: "EMAIL" | "SMS" }> {
     if (!input.name || input.name.trim().length < 2) {
       return { success: false, message: "Enter your full name." };
@@ -604,7 +841,10 @@ class AuthService {
     }
 
     // Dispatch verification OTP to email
-    const otpRes = await otpProvider.sendOtp(input.email, "EMAIL");
+    const otpRes = await otpProvider.sendOtp(input.email, "EMAIL", {
+      purpose: "REGISTRATION",
+      isDemo: isDemoAccount(input.email),
+    });
     if (!otpRes.success) {
       return { success: false, message: otpRes.message };
     }
@@ -631,6 +871,12 @@ class AuthService {
     phone: string;
     password: string;
     otp: string;
+    hasDematDeclared?: boolean;
+    hasDemat?: boolean;
+    selectedBroker?: string;
+    broker?: string;
+    brokerClientId?: string;
+    dematUcc?: string;
   }): Promise<{ success: boolean; user?: UserProfile; message: string }> {
     const verifyRes = await otpProvider.verifyOtp(input.email, input.otp);
     if (!verifyRes.success) {
@@ -649,6 +895,16 @@ class AuthService {
       ? input.phone
       : `+91 ${this.normalizePhone(input.phone).slice(-10)}`;
 
+    // Compute verified trading account status
+    const tradingAccountDetails = this.verifyTradingAccount({
+      hasDematDeclared: input.hasDematDeclared,
+      hasDemat: input.hasDemat,
+      selectedBroker: input.selectedBroker,
+      broker: input.broker,
+      brokerClientId: input.brokerClientId,
+      dematUcc: input.dematUcc,
+    });
+
     const newUser: UserProfile = {
       id: `USR-${Date.now()}`,
       userId: newUserId,
@@ -666,6 +922,7 @@ class AuthService {
       kyc: {
         status: "UNVERIFIED",
       },
+      tradingAccount: tradingAccountDetails,
       createdAt: new Date().toISOString(),
     };
 
@@ -751,7 +1008,10 @@ class AuthService {
     // MANDATORY OTP CHALLENGE: Send OTP to user's registered contact
     const channel = user.email ? "EMAIL" : "SMS";
     const dest = channel === "EMAIL" ? user.email : user.phone;
-    const otpResult = await otpProvider.sendOtp(dest, channel);
+    const otpResult = await otpProvider.sendOtp(dest, channel, {
+      purpose: "LOGIN",
+      isDemo: isDemoAccount(dest) || isDemoAccount(identifier),
+    });
 
     if (!otpResult.success) {
       return { success: false, message: otpResult.message };
@@ -831,7 +1091,17 @@ class AuthService {
 
     const channel = user.email ? "EMAIL" : "SMS";
     const dest = channel === "EMAIL" ? user.email : user.phone;
-    const otpResult = await otpProvider.sendOtp(dest, channel);
+    const otpResult = await otpProvider.sendOtp(dest, channel, {
+      purpose: "LOGIN",
+      isDemo: isDemoAccount(dest) || isDemoAccount(identifier),
+    });
+
+    if (!otpResult.success) {
+      return {
+        success: false,
+        message: otpResult.message || "Unable to send verification code. Please try again.",
+      };
+    }
 
     this.recordActivity(
       "OTP_REQUESTED",
@@ -910,7 +1180,17 @@ class AuthService {
 
     const dest = user.email || user.phone;
     const channel = user.email ? "EMAIL" : "SMS";
-    const otpResult = await otpProvider.sendOtp(dest, channel);
+    const otpResult = await otpProvider.sendOtp(dest, channel, {
+      purpose: "RESET_PASSWORD",
+      isDemo: isDemoAccount(dest) || isDemoAccount(identifier),
+    });
+
+    if (!otpResult.success) {
+      return {
+        success: false,
+        message: otpResult.message || "Unable to send verification code. Please try again.",
+      };
+    }
 
     this.recordActivity(
       "PASSWORD_RESET_REQUESTED",
@@ -1302,14 +1582,20 @@ class AuthService {
     return DEMO_ACCOUNTS;
   }
 
-  /** Retrieve test/demo OTP in development environments */
+  /** Check if an identifier is a designated DEMO / EXAMINER account */
+  public isDemoAccount(identifier: string): boolean {
+    return isDemoAccount(identifier);
+  }
+
+  /** Retrieve test/demo OTP in development environments for demo accounts */
   public getTestOtp(identifier: string): string | undefined {
     if (typeof process !== "undefined" && process.env.NODE_ENV === "production") {
       return undefined;
     }
+    const isDemo = isDemoAccount(identifier);
+    if (!isDemo) return undefined;
     const user = this.findUserByIdentifier(identifier);
-    if (!user) return undefined;
-    const dest = user.email || user.phone;
+    const dest = user ? user.email || user.phone : identifier;
     return otpProvider._getTestToken(dest);
   }
 
