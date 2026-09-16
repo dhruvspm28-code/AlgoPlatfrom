@@ -33,11 +33,33 @@ const growwServerPlugin: Plugin = {
           serverMarketData.handleStream(req, res);
           return;
         }
+        if (url === "/api/market-data/reconnect" || url.startsWith("/api/market-data/reconnect?")) {
+          await serverMarketData.handleReconnect(res);
+          return;
+        }
+        if (url === "/api/market-data/historical" || url.startsWith("/api/market-data/historical?")) {
+          await serverMarketData.handleHistorical(req, res);
+          return;
+        }
+        if (url === "/api/market-data/candles" || url.startsWith("/api/market-data/candles?")) {
+          serverMarketData.handleCandles(req, res);
+          return;
+        }
 
         if (url === "/api/auth/otp/status") {
           const { serverOtpEngine } = await import("./src/services/otp-engine-server");
           res.setHeader("Content-Type", "application/json");
           res.end(JSON.stringify(serverOtpEngine.getProviderStatus()));
+          return;
+        }
+
+        if (url.startsWith("/api/auth/otp/test-token") || url.startsWith("/api/auth/otp/test-otp")) {
+          const { serverOtpEngine } = await import("./src/services/otp-engine-server");
+          const urlObj = new URL(url, "http://localhost");
+          const target = urlObj.searchParams.get("target") || "";
+          const token = serverOtpEngine.getDemoToken(target);
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ success: true, testOtp: token }));
           return;
         }
 

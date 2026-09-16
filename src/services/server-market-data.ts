@@ -13,6 +13,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { checkEnvConfigured } from "./safe-env";
 import { GrowwAPI, GrowwFeed, type GrowwInstrument, type ParsedSocketResponse } from "./groww-feed";
 import { WATCHLIST_INSTRUMENTS, type InstrumentMapping } from "./instrument-mapper";
+import { candleAggregator } from "./candle-aggregator";
 import {
   type NormalizedTick,
   type FeedConnectionState,
@@ -25,12 +26,70 @@ class ServerMarketDataManager {
   private provenanceText = "INITIALIZING: Server-side Groww Feed starting...";
   private lastVerifiedSnapshot = new Map<string, NormalizedTick>();
   private sseClients = new Set<ServerResponse>();
+  private streamControllers = new Set<ReadableStreamDefaultController<Uint8Array>>();
   private isInitialized = false;
   private tokenToSymbol = new Map<string, InstrumentMapping>();
+  private authMode: "access_token" | "api_key_secret" = "api_key_secret";
+  private authReason: "SESSION_APPROVAL_REQUIRED" | "INVALID_CREDENTIALS" | "NONE" | string = "NONE";
+  private authenticated = false;
+
+  // Real-time Runtime Diagnostics
+  private packetsReceived = 0;
+  private packetsDecoded = 0;
+  private eventsPublished = 0;
+  private lastTickSymbol = "";
+  private lastTickLtp = 0;
+  private lastTickPrevLtp = 0;
+  private lastTickTimestamp = "";
+  private lastReceivedAt = 0;
+  private previousClosesMap = new Map<string, number>();
 
   constructor() {
     this.buildTokenMap();
     this.initializeBaselineSnapshots();
+    this.fetchExchangePreviousCloses().catch(() => {});
+  }
+
+  public async fetchExchangePreviousCloses(): Promise<void> {
+    const tickers: Record<string, string> = {
+      "NIFTY 50": "%5ENSEI",
+      "SENSEX": "%5EBSESN",
+      "BANK NIFTY": "%5ENSEBANK",
+      "RELIANCE": "RELIANCE.NS",
+      "TCS": "TCS.NS",
+      "INFY": "INFY.NS",
+      "HDFCBANK": "HDFCBANK.NS",
+      "ICICIBANK": "ICICIBANK.NS",
+      "SBIN": "SBIN.NS",
+      "TATAMOTORS": "TMPV.NS",
+    };
+
+    await Promise.all(
+      Object.entries(tickers).map(async ([sym, ticker]) => {
+        try {
+          const res = await fetch(
+            `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=5d`,
+            { headers: { "User-Agent": "Mozilla/5.0" } },
+          );
+          if (res.ok) {
+            const data = await res.json();
+            const meta = data?.chart?.result?.[0]?.meta;
+            const prevClose = meta?.chartPreviousClose || meta?.previousClose;
+            if (typeof prevClose === "number" && prevClose > 0) {
+              this.previousClosesMap.set(sym, Number(prevClose.toFixed(2)));
+              const snap = this.lastVerifiedSnapshot.get(sym);
+              if (snap) {
+                snap.previousClose = Number(prevClose.toFixed(2));
+                snap.change = Number((snap.price - prevClose).toFixed(2));
+                snap.changePct = Number(((snap.change / prevClose) * 100).toFixed(2));
+              }
+            }
+          }
+        } catch {
+          // preserve baseline
+        }
+      }),
+    );
   }
 
   private buildTokenMap() {
@@ -82,14 +141,31 @@ class ServerMarketDataManager {
     return "MARKET CLOSED";
   }
 
-  public async start(): Promise<void> {
-    if (this.isInitialized) return;
+  public async start(force = false): Promise<void> {
+    if (this.isInitialized && !force) return;
     this.isInitialized = true;
 
+    if (this.feed) {
+      try {
+        this.feed.disconnect();
+      } catch {
+        // ignore
+      }
+      this.feed = null;
+    }
+
     const envStatus = checkEnvConfigured();
-    if (!envStatus.growwApiKey || !envStatus.growwApiSecret) {
+    this.authMode = envStatus.growwAuthMode === "ACCESS_TOKEN" ? "access_token" : "api_key_secret";
+
+    if (!envStatus.growwConfigured) {
       this.connectionState = "CONFIG_ERROR";
-      this.provenanceText = "CONFIG ERROR: Groww credentials missing in server .env.";
+      this.authenticated = false;
+      this.authReason = "INVALID_CREDENTIALS";
+      this.provenanceText =
+        this.authMode === "access_token"
+          ? "CONFIG ERROR: GROWW_ACCESS_TOKEN missing or invalid in server .env."
+          : "CONFIG ERROR: Groww credentials missing in server .env.";
+      this.broadcastStatus();
       return;
     }
 
@@ -102,13 +178,19 @@ class ServerMarketDataManager {
       this.connectionState = "CONNECTING";
       this.provenanceText = "CONNECTING: Authenticating with Groww Trade Gateway...";
     }
+    this.broadcastStatus();
 
     try {
-      const apiKey = process.env.GROWW_API_KEY!;
-      const apiSecret = process.env.GROWW_API_SECRET!;
+      // 1. Authenticate with official Groww API (or direct Access Token)
+      const sessionToken = await GrowwAPI.resolveSessionToken({
+        authMode: this.authMode,
+        accessToken: process.env.GROWW_ACCESS_TOKEN,
+        apiKey: process.env.GROWW_API_KEY,
+        apiSecret: process.env.GROWW_API_SECRET,
+      });
 
-      // 1. Authenticate with official Groww API
-      const sessionToken = await GrowwAPI.getAccessToken(apiKey, apiSecret);
+      this.authenticated = true;
+      this.authReason = "NONE";
 
       // 2. Initialize official GrowwFeed NATS client
       this.feed = new GrowwFeed(sessionToken);
@@ -161,9 +243,39 @@ class ServerMarketDataManager {
       this.feed.subscribe_index_value(indices);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      this.connectionState = "AUTH_ERROR";
-      this.provenanceText = `GROWW CONNECTION ERROR: ${msg}`;
+      this.authenticated = false;
+      const isSessionApproval =
+        (err as unknown as { code?: string })?.code === "SESSION_APPROVAL_REQUIRED" ||
+        msg.toLowerCase().includes("session approval");
+
+      if (isSessionApproval) {
+        this.connectionState = "AUTH_ERROR";
+        this.authReason = "SESSION_APPROVAL_REQUIRED";
+        this.provenanceText =
+          "GROWW AUTH ERROR: Session approval required before generating token. Please approve session in Groww Developer Portal.";
+      } else {
+        this.connectionState = "AUTH_ERROR";
+        this.authReason = "INVALID_CREDENTIALS";
+        this.provenanceText = `GROWW CONNECTION ERROR: ${msg}`;
+      }
+      this.broadcastStatus();
     }
+  }
+
+  public async reconnect(): Promise<{ success: boolean; state: FeedConnectionState; message: string }> {
+    await this.start(true);
+    return {
+      success: this.connectionState !== "AUTH_ERROR" && this.connectionState !== "CONFIG_ERROR",
+      state: this.connectionState,
+      message: this.provenanceText,
+    };
+  }
+
+  public async handleReconnect(res: ServerResponse): Promise<void> {
+    const result = await this.reconnect();
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Cache-Control", "no-cache");
+    res.end(JSON.stringify(result));
   }
 
   private handleTick(topic: string, data: ParsedSocketResponse) {
@@ -208,8 +320,10 @@ class ServerMarketDataManager {
       low: mapping.basePrice,
     };
 
-    const change = Number((price - prev.previousClose).toFixed(2));
-    const changePct = Number(((change / prev.previousClose) * 100).toFixed(2));
+    const prevClose =
+      this.previousClosesMap.get(mapping.symbol) || prev.previousClose || mapping.basePrice;
+    const change = prevClose > 0 ? Number((price - prevClose).toFixed(2)) : 0;
+    const changePct = prevClose > 0 ? Number(((change / prevClose) * 100).toFixed(2)) : 0;
 
     const tick: NormalizedTick = {
       symbol: mapping.symbol,
@@ -219,7 +333,7 @@ class ServerMarketDataManager {
       open: open || prev.open,
       high: Math.max(prev.high, high, price),
       low: Math.min(prev.low, low, price),
-      previousClose: prev.previousClose,
+      previousClose: prevClose,
       change,
       changePct,
       volume,
@@ -228,7 +342,17 @@ class ServerMarketDataManager {
       status: "LIVE",
     };
 
+    this.packetsReceived++;
+    this.packetsDecoded++;
+    this.eventsPublished++;
+    this.lastTickPrevLtp = this.lastTickLtp;
+    this.lastTickLtp = price;
+    this.lastTickSymbol = mapping.symbol;
+    this.lastTickTimestamp = new Date(tsInMillis).toISOString();
+    this.lastReceivedAt = Date.now();
+
     this.lastVerifiedSnapshot.set(mapping.symbol, tick);
+    candleAggregator.addTick(tick);
 
     if (this.connectionState !== "LIVE") {
       this.connectionState = "LIVE";
@@ -236,10 +360,24 @@ class ServerMarketDataManager {
       this.broadcastStatus();
     }
 
-    // Broadcast tick to all connected SSE clients
+    // Broadcast tick to all connected SSE clients (both Web Streams and Node Responses)
     const msg = `data: ${JSON.stringify(tick)}\n\n`;
+    const encoded = new TextEncoder().encode(msg);
+
+    for (const controller of this.streamControllers) {
+      try {
+        controller.enqueue(encoded);
+      } catch {
+        this.streamControllers.delete(controller);
+      }
+    }
+
     for (const client of this.sseClients) {
-      client.write(msg);
+      try {
+        client.write(msg);
+      } catch {
+        this.sseClients.delete(client);
+      }
     }
   }
 
@@ -249,22 +387,51 @@ class ServerMarketDataManager {
       status: this.getStatus(),
     });
     const msg = `data: ${statusPayload}\n\n`;
+    const encoded = new TextEncoder().encode(msg);
+
+    for (const controller of this.streamControllers) {
+      try {
+        controller.enqueue(encoded);
+      } catch {
+        this.streamControllers.delete(controller);
+      }
+    }
+
     for (const client of this.sseClients) {
-      client.write(msg);
+      try {
+        client.write(msg);
+      } catch {
+        this.sseClients.delete(client);
+      }
     }
   }
 
   public getStatus() {
     const envStatus = checkEnvConfigured();
+    const feedMetrics = this.feed?.getPacketMetrics?.();
     return {
-      growwConfigured: envStatus.growwApiKey && envStatus.growwApiSecret,
+      growwConfigured: envStatus.growwConfigured,
       connectionState: this.connectionState,
       provenanceText: this.provenanceText,
       marketSession: this.calculateMarketSession(),
       subscribedCount: WATCHLIST_INSTRUMENTS.length,
-      lastTickTimestamp: new Date().toISOString(),
+      lastTickTimestamp: this.lastTickTimestamp || new Date().toISOString(),
       provider: "groww",
       providerName: "Groww Trade Gateway",
+      authMode: this.authMode,
+      authReason: this.authReason,
+      authenticated: this.authenticated,
+      metrics: {
+        packetsReceived: feedMetrics ? feedMetrics.packetsReceived : this.packetsReceived,
+        packetsDecoded: feedMetrics ? feedMetrics.packetsDecoded : this.packetsDecoded,
+        eventsPublished: this.eventsPublished,
+        lastTickSymbol: this.lastTickSymbol,
+        lastTickLtp: this.lastTickLtp,
+        lastTickPrevLtp: this.lastTickPrevLtp,
+        lastTickTimestamp: this.lastTickTimestamp,
+        secondsSinceLastTick:
+          this.lastReceivedAt > 0 ? Math.max(0, Math.floor((Date.now() - this.lastReceivedAt) / 1000)) : null,
+      },
     };
   }
 
@@ -272,7 +439,51 @@ class ServerMarketDataManager {
     return Array.from(this.lastVerifiedSnapshot.values());
   }
 
-  // HTTP Middleware Handlers for Vite / Nitro
+  // Web Standard Stream Response (for TanStack Start / Modern fetch)
+  public createStreamResponse(request: Request): Response {
+    const encoder = new TextEncoder();
+    let clientController: ReadableStreamDefaultController<Uint8Array> | null = null;
+
+    const stream = new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        clientController = controller;
+        this.streamControllers.add(controller);
+
+        // Send initial status and snapshots
+        const statusMsg = `data: ${JSON.stringify({ type: "STATUS", status: this.getStatus() })}\n\n`;
+        controller.enqueue(encoder.encode(statusMsg));
+
+        for (const tick of this.lastVerifiedSnapshot.values()) {
+          const tickMsg = `data: ${JSON.stringify(tick)}\n\n`;
+          controller.enqueue(encoder.encode(tickMsg));
+        }
+      },
+      cancel: () => {
+        if (clientController) {
+          this.streamControllers.delete(clientController);
+        }
+      },
+    });
+
+    request.signal.addEventListener("abort", () => {
+      if (clientController) {
+        this.streamControllers.delete(clientController);
+      }
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "Access-Control-Allow-Origin": "*",
+        "X-Accel-Buffering": "no",
+      },
+    });
+  }
+
+  // HTTP Middleware Handlers for Vite / Node connect
   public handleStatus(res: ServerResponse) {
     res.setHeader("Content-Type", "application/json");
     res.setHeader("Cache-Control", "no-cache");
@@ -304,6 +515,68 @@ class ServerMarketDataManager {
     req.on("close", () => {
       this.sseClients.delete(res);
     });
+  }
+
+  public async handleHistoricalRequest(url: URL): Promise<Response> {
+    const { historicalMarketDataProvider } = await import("./historical-market-data");
+    const symbol = url.searchParams.get("symbol") || "RELIANCE";
+    const range = (url.searchParams.get("range") || "1D") as any;
+    const resolution = url.searchParams.get("resolution") as any;
+
+    const result = await historicalMarketDataProvider.getHistoricalCandles({
+      symbol,
+      range,
+      resolution,
+    });
+
+    return new Response(JSON.stringify(result), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "public, max-age=60",
+      },
+    });
+  }
+
+  public async handleHistorical(req: IncomingMessage, res: ServerResponse) {
+    const { historicalMarketDataProvider } = await import("./historical-market-data");
+    const fullUrl = new URL(req.url || "", "http://localhost");
+    const symbol = fullUrl.searchParams.get("symbol") || "RELIANCE";
+    const range = (fullUrl.searchParams.get("range") || "1D") as any;
+    const resolution = fullUrl.searchParams.get("resolution") as any;
+
+    const result = await historicalMarketDataProvider.getHistoricalCandles({
+      symbol,
+      range,
+      resolution,
+    });
+
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Cache-Control", "public, max-age=60");
+    res.end(JSON.stringify(result));
+  }
+
+  public handleCandles(req: IncomingMessage, res: ServerResponse) {
+    const fullUrl = new URL(req.url || "", "http://localhost");
+    const symbol = fullUrl.searchParams.get("symbol") || "BANK NIFTY";
+    const timeframe = (fullUrl.searchParams.get("timeframe") || "15m") as any;
+    const candles = candleAggregator.getCandles(symbol, timeframe);
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Cache-Control", "no-cache");
+    res.end(JSON.stringify({ success: true, symbol, timeframe, candles, count: candles.length }));
+  }
+
+  public handleCandlesRequest(url: URL): Response {
+    const symbol = url.searchParams.get("symbol") || "BANK NIFTY";
+    const timeframe = (url.searchParams.get("timeframe") || "15m") as any;
+    const candles = candleAggregator.getCandles(symbol, timeframe);
+    return new Response(
+      JSON.stringify({ success: true, symbol, timeframe, candles, count: candles.length }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
+      },
+    );
   }
 }
 

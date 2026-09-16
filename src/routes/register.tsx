@@ -199,6 +199,10 @@ export function Register() {
     setResendSeconds(45);
     toast.success(res.message);
     setCurrentStep("OTP_VERIFY");
+    if (res.testOtp) {
+      setOtp(res.testOtp);
+      toast.success("Demo OTP auto-filled");
+    }
   }
 
   // Resend OTP for Registration
@@ -223,6 +227,10 @@ export function Register() {
     if (res.success) {
       setResendSeconds(45);
       toast.info(`New verification code dispatched via SMS to ${maskPhone(phone)}`);
+      if (res.testOtp) {
+        setOtp(res.testOtp);
+        toast.success("Demo OTP auto-filled");
+      }
     } else {
       toast.error(res.message || "Unable to send verification code. Please try again.");
     }

@@ -17,12 +17,10 @@ import {
   Layers,
   Zap,
 } from "lucide-react";
-import { useState, useMemo } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { toast } from "sonner";
 
-import { AreaSeries } from "@/components/charts/Charts";
 import { GlassCard, PageHeader, StatCard, StatusPill, inr } from "@/components/ui-kit/primitives";
-import { monthlyReturns, recentTrades } from "@/data/market";
 import { usePlatform } from "@/context/PlatformContext";
 import { Button } from "@/components/ui/button";
 import {
@@ -35,11 +33,14 @@ import {
 } from "@/components/ui/dialog";
 import { WatchlistTable } from "@/components/trading/WatchlistTable";
 import { InstrumentDrawer } from "@/components/trading/InstrumentDrawer";
+import { TradingChart } from "@/components/trading/TradingChart";
 import { marketDataEngine } from "@/services/market-data-engine";
-import { instrumentMapper } from "@/services/instrument-mapper";
+import { instrumentMapper, WATCHLIST_INSTRUMENTS } from "@/services/instrument-mapper";
 import { candleAggregator } from "@/services/candle-aggregator";
 import { IndicatorEngine } from "@/services/indicator-engine";
 import { marketRegimeEngine } from "@/services/market-regime";
+import { realtimeBus } from "@/services/realtime-bus";
+import { type NormalizedTick, type Timeframe } from "@/services/market-data-types";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/app/")({
@@ -80,45 +81,61 @@ export function Dashboard() {
     strategies,
     paperPositions,
     paperPortfolio,
+    feedStatus,
   } = usePlatform();
 
   const [confirmResumeOpen, setConfirmResumeOpen] = useState(false);
-  const [selectedSymbol, setSelectedSymbol] = useState<string>("RELIANCE");
+  const [selectedSymbol, setSelectedSymbol] = useState<string>("NIFTY 50");
   const [drawerSymbol, setDrawerSymbol] = useState<string | null>(null);
-  const [timeframe, setTimeframe] = useState<"15m" | "1h" | "1D">("15m");
+  const [timeframe, setTimeframe] = useState<Timeframe>("15m");
 
-  const activeLiveCount = strategies.filter((s) => s.status === "LIVE").length;
-  const activePaperCount = strategies.filter((s) => s.status === "PAPER").length;
+  const [liveTick, setLiveTick] = useState<NormalizedTick | undefined>(() =>
+    marketDataEngine.getLatestTick("NIFTY 50"),
+  );
+  const [, setTickCount] = useState(0);
+
+  // Subscribe to real-time market ticks across all instruments
+  useEffect(() => {
+    const initial = marketDataEngine.getLatestTick(selectedSymbol);
+    if (initial) setLiveTick(initial);
+
+    const unsub = realtimeBus.subscribe("MARKET_TICK", (evt) => {
+      const t = evt.payload as NormalizedTick;
+      if (t && t.symbol === selectedSymbol) {
+        setLiveTick(t);
+      }
+      setTickCount((c) => c + 1);
+    });
+
+    return () => unsub();
+  }, [selectedSymbol]);
+
+  const activeLiveCount = (strategies || []).filter((s) => s.status === "LIVE").length;
+  const activePaperCount = (strategies || []).filter((s) => s.status === "PAPER").length;
 
   // Real data for selected instrument
   const selectedMapping = instrumentMapper.getMapping(selectedSymbol) || {
     symbol: selectedSymbol,
     name: selectedSymbol,
     exchange: "NSE" as const,
-    assetClass: "EQUITY" as const,
+    assetClass: "INDEX" as const,
     nseToken: "0",
     upstoxKey: "",
     dhanToken: "",
-    lotSize: 1,
+    lotSize: 25,
     tickSize: 0.05,
-    basePrice: 1000,
+    basePrice: 23477.8,
   };
 
-  const tick = marketDataEngine.getLatestTick(selectedSymbol);
-  const ltp = tick ? tick.price : selectedMapping.basePrice;
-  const change = tick ? tick.change : 0;
-  const changePct = tick ? tick.changePct : 0;
+  const ltp = liveTick ? liveTick.price : selectedMapping.basePrice;
+  const change = liveTick ? liveTick.change : 0;
+  const changePct = liveTick ? liveTick.changePct : 0;
   const isUp = changePct >= 0;
 
   // Aggregated candles & indicators for selected instrument
   const candles = candleAggregator.getCandles(selectedSymbol, timeframe);
   const indicators = IndicatorEngine.calculateAll(candles);
   const regime = marketRegimeEngine.getRegime();
-
-  const chartData = candles.slice(-40).map((c) => ({
-    time: new Date(c.openTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-    value: c.close,
-  }));
 
   // Calculate real Market Breadth & Top Movers across monitored universe
   const universe = instrumentMapper.getAllWatchlist();
@@ -304,120 +321,74 @@ export function Dashboard() {
           />
         </div>
 
-        {/* CENTER: Selected Instrument Chart & Technicals (6 cols) */}
-        <GlassCard className="p-4 xl:col-span-6 space-y-4">
-          {/* Header */}
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 pb-3">
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-lg font-bold text-foreground">{selectedMapping.symbol}</h2>
-                <span className="text-[10px] rounded px-1.5 py-0.5 bg-surface-3 text-muted-foreground font-semibold">
-                  {selectedMapping.name}
-                </span>
+        {/* CENTER: Selected Instrument Institutional Candlestick Chart (6 cols) */}
+        <div className="xl:col-span-6 space-y-3">
+          {/* Quick Instrument Selector Tabs */}
+          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+            {WATCHLIST_INSTRUMENTS.map((inst) => {
+              const isSel = selectedSymbol === inst.symbol;
+              const t = marketDataEngine.getLatestTick(inst.symbol);
+              const curLtp = t ? t.price : inst.basePrice;
+              const chgPct = t ? t.changePct : 0;
+              const pos = chgPct >= 0;
+
+              return (
                 <button
-                  onClick={() => setDrawerSymbol(selectedSymbol)}
-                  className="text-primary hover:underline text-[10px] font-semibold flex items-center gap-0.5 ml-1"
-                >
-                  Inspect <ArrowUpRight className="h-3 w-3" />
-                </button>
-              </div>
-
-              <div className="flex items-center gap-3 mt-1 text-xs num">
-                <span className="text-base font-extrabold text-foreground">
-                  ₹{ltp.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
-                </span>
-                <span
+                  key={inst.symbol}
+                  onClick={() => setSelectedSymbol(inst.symbol)}
                   className={cn(
-                    "font-bold flex items-center gap-1",
-                    isUp ? "text-bull" : "text-bear",
+                    "flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold shrink-0 transition-all border cursor-pointer",
+                    isSel
+                      ? "bg-primary text-primary-foreground border-primary shadow-sm"
+                      : "bg-surface-2/60 border-border/50 text-muted-foreground hover:text-foreground hover:bg-surface-2",
                   )}
                 >
-                  {isUp ? (
-                    <TrendingUp className="h-3.5 w-3.5" />
-                  ) : (
-                    <TrendingDown className="h-3.5 w-3.5" />
-                  )}
-                  {isUp ? "+" : ""}
-                  {change.toFixed(2)} ({isUp ? "+" : ""}
-                  {changePct.toFixed(2)}%)
-                </span>
-              </div>
-            </div>
-
-            {/* Timeframes & Live Terminal Action */}
-            <div className="flex items-center gap-2">
-              <div className="flex items-center gap-1 bg-surface-2 p-1 rounded-xl">
-                {(["15m", "1h", "1D"] as const).map((tf) => (
-                  <button
-                    key={tf}
-                    onClick={() => setTimeframe(tf)}
+                  <span>{inst.symbol}</span>
+                  <span
                     className={cn(
-                      "px-2 py-0.5 text-[11px] font-semibold rounded-lg transition-all cursor-pointer",
-                      timeframe === tf
-                        ? "bg-primary text-primary-foreground shadow"
-                        : "text-muted-foreground hover:text-foreground",
+                      "text-[9px] font-mono font-semibold",
+                      isSel ? "text-primary-foreground/90" : pos ? "text-bull" : "text-bear",
                     )}
                   >
-                    {tf}
-                  </button>
-                ))}
+                    {pos ? "+" : ""}
+                    {chgPct.toFixed(1)}%
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Canonical Institutional Trading Chart Reused from Live Terminal */}
+          <TradingChart
+            symbol={selectedSymbol}
+            exchange={selectedMapping.exchange as "NSE" | "BSE"}
+            feedStatus={feedStatus}
+            currentTick={liveTick}
+            timeframe={timeframe}
+            onTimeframeChange={setTimeframe}
+            showDiagnostics={true}
+          />
+
+          {/* Quick Action to Trade in Live Terminal */}
+          <div className="flex items-center justify-between p-2.5 rounded-xl border border-primary/30 bg-primary/10 text-xs">
+            <div className="flex items-center gap-2">
+              <Zap className="h-4 w-4 text-primary animate-pulse" />
+              <div>
+                <p className="font-bold text-foreground">Execute Algorithms & Orders</p>
+                <p className="text-[11px] text-muted-foreground">
+                  Trade {selectedSymbol} with live order routing, risk engine, and trade explanation
+                </p>
               </div>
-
-              <Button
-                size="sm"
-                onClick={() => navigate({ to: "/app/live" })}
-                className="h-7 px-2.5 text-xs font-bold gap-1"
-              >
-                <Zap className="h-3 w-3" /> Trade in Live Terminal
-              </Button>
             </div>
+            <Button
+              size="sm"
+              onClick={() => navigate({ to: "/app/live" })}
+              className="h-7 px-3 text-xs font-bold gap-1 cursor-pointer"
+            >
+              Open Live Terminal <ArrowUpRight className="h-3.5 w-3.5" />
+            </Button>
           </div>
-
-          {/* Interactive Chart */}
-          <div className="h-64 w-full">
-            <AreaSeries data={chartData} dataKey="value" xKey="time" height={250} />
-          </div>
-
-          {/* Live Indicator Snapshot Bar */}
-          <div className="grid grid-cols-4 gap-2 border-t border-border/60 pt-3 text-center num text-xs">
-            <div className="rounded-lg bg-surface-2/60 p-2">
-              <p className="text-[10px] text-muted-foreground">VWAP</p>
-              <p className="font-bold text-foreground">₹{indicators.vwap.value.toFixed(1)}</p>
-            </div>
-            <div className="rounded-lg bg-surface-2/60 p-2">
-              <p className="text-[10px] text-muted-foreground">RSI (14)</p>
-              <p
-                className={cn(
-                  "font-bold",
-                  indicators.rsi14.value > 70
-                    ? "text-bear"
-                    : indicators.rsi14.value < 30
-                      ? "text-bull"
-                      : "text-foreground",
-                )}
-              >
-                {indicators.rsi14.value.toFixed(1)}
-              </p>
-            </div>
-            <div className="rounded-lg bg-surface-2/60 p-2">
-              <p className="text-[10px] text-muted-foreground">EMA (9/21)</p>
-              <p className="font-bold text-foreground">
-                {indicators.ema9.value} / {indicators.ema21.value}
-              </p>
-            </div>
-            <div className="rounded-lg bg-surface-2/60 p-2">
-              <p className="text-[10px] text-muted-foreground">Supertrend</p>
-              <p
-                className={cn(
-                  "font-bold",
-                  indicators.supertrend.value.trend === "BULLISH" ? "text-bull" : "text-bear",
-                )}
-              >
-                {indicators.supertrend.value.trend}
-              </p>
-            </div>
-          </div>
-        </GlassCard>
+        </div>
 
         {/* RIGHT: Market Summary, Breadth, Movers (3 cols) */}
         <div className="xl:col-span-3 space-y-4">
@@ -583,8 +554,13 @@ export function Dashboard() {
                   </tr>
                 ) : (
                   paperPositions.map((pos) => (
-                    <tr key={pos.symbol} className="hover:bg-surface-2/50 transition-colors">
-                      <td className="py-2.5 font-bold text-foreground">{pos.symbol}</td>
+                    <tr
+                      key={pos.symbol}
+                      onClick={() => setSelectedSymbol(pos.symbol)}
+                      className="hover:bg-surface-2/70 transition-colors cursor-pointer"
+                      title={`Click to view ${pos.symbol} on chart`}
+                    >
+                      <td className="py-2.5 font-bold text-foreground hover:text-primary transition-colors">{pos.symbol}</td>
                       <td className="py-2.5">
                         <span
                           className={cn(

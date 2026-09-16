@@ -15,6 +15,8 @@
  */
 
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 
 export interface GrowwInstrument {
   exchange: "NSE" | "BSE";
@@ -323,6 +325,7 @@ export class GrowwAPI {
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
+        Connection: "close",
         "x-client-id": "growwapi",
         "x-client-platform": "growwapi-web-client",
         "x-client-platform-version": "1.5.0",
@@ -337,6 +340,28 @@ export class GrowwAPI {
 
     if (!res.ok) {
       const errText = await res.text();
+      let isSessionApproval = false;
+      try {
+        const errJson = JSON.parse(errText);
+        if (
+          errJson?.error?.errorCode === "403" ||
+          errJson?.error?.errorMessage?.toLowerCase().includes("session approval")
+        ) {
+          isSessionApproval = true;
+        }
+      } catch {
+        if (errText.toLowerCase().includes("session approval")) {
+          isSessionApproval = true;
+        }
+      }
+
+      if (res.status === 403 || isSessionApproval) {
+        const err = new Error("Groww session approval required");
+        (err as unknown as { code: string; status: number }).code = "SESSION_APPROVAL_REQUIRED";
+        (err as unknown as { code: string; status: number }).status = 403;
+        throw err;
+      }
+
       throw new Error(`Groww token exchange failed (${res.status}): ${errText.slice(0, 150)}`);
     }
 
@@ -345,7 +370,103 @@ export class GrowwAPI {
       throw new Error("Groww token exchange response missing token");
     }
 
+    GrowwAPI.saveCachedToken(data.token);
     return data.token;
+  }
+
+  private static loadCachedToken(): string | null {
+    try {
+      const cachePath = path.resolve(process.cwd(), ".groww_token_cache.tmp");
+      if (fs.existsSync(cachePath)) {
+        const raw = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+        if (raw.token && typeof raw.token === "string" && raw.expiresAt > Date.now()) {
+          return raw.token;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  }
+
+  private static saveCachedToken(token: string): void {
+    try {
+      const cachePath = path.resolve(process.cwd(), ".groww_token_cache.tmp");
+      fs.writeFileSync(
+        cachePath,
+        JSON.stringify({ token, expiresAt: Date.now() + 6 * 3600 * 1000 }),
+        "utf8",
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  public static clearCachedToken(): void {
+    try {
+      const cachePath = path.resolve(process.cwd(), ".groww_token_cache.tmp");
+      if (fs.existsSync(cachePath)) {
+        fs.unlinkSync(cachePath);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  public static async resolveSessionToken(options: {
+    authMode?: "access_token" | "api_key_secret";
+    accessToken?: string;
+    apiKey?: string;
+    apiSecret?: string;
+  }): Promise<string> {
+    if (options.accessToken && options.accessToken.trim().length > 0) {
+      return options.accessToken.trim();
+    }
+
+    const apiKey = options.apiKey?.trim();
+    // If the configured key is already a full JWT token, use directly as session token
+    if (apiKey && apiKey.startsWith("eyJ") && apiKey.split(".").length === 3) {
+      return apiKey;
+    }
+
+    const mode = options.authMode || (options.accessToken && !options.apiKey ? "access_token" : "api_key_secret");
+    if (mode === "access_token") {
+      if (!options.accessToken || options.accessToken.trim().length === 0) {
+        throw new Error("GROWW_ACCESS_TOKEN is missing in access_token auth mode");
+      }
+      return options.accessToken.trim();
+    }
+
+    if (!options.apiKey || !options.apiSecret) {
+      throw new Error("GROWW_API_KEY or GROWW_API_SECRET missing in api_key_secret mode");
+    }
+
+    // Check disk/memory cache first to avoid Groww rate limiting
+    const cached = GrowwAPI.loadCachedToken();
+    if (cached) {
+      return cached;
+    }
+
+    return await GrowwAPI.getAccessToken(options.apiKey, options.apiSecret);
+  }
+
+  public static async validateMarketDataAccess(sessionToken: string): Promise<{ valid: boolean; message: string }> {
+    try {
+      const testKeyPair = crypto.generateKeyPairSync("ed25519");
+      const rawPub = testKeyPair.publicKey.export({ type: "spki", format: "der" }).subarray(-32);
+      const testNkey = generateNKeysUserKey(rawPub);
+      const socketToken = await GrowwAPI.generateSocketToken(sessionToken, testNkey);
+      if (socketToken && socketToken.token) {
+        return { valid: true, message: "Groww market data gateway session verified." };
+      }
+      return { valid: false, message: "Groww socket token response invalid." };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("403") || msg.includes("approval")) {
+        return { valid: false, message: "Groww session approval required" };
+      }
+      return { valid: false, message: msg };
+    }
   }
 
   public static async generateSocketToken(
@@ -357,6 +478,7 @@ export class GrowwAPI {
       headers: {
         Authorization: `Bearer ${sessionToken}`,
         "Content-Type": "application/json",
+        Connection: "close",
         "x-client-id": "growwapi",
         "x-api-version": "1.0",
       },
@@ -414,6 +536,17 @@ export class GrowwFeed {
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private isDisposed = false;
+  private packetsReceivedCount = 0;
+  private packetsDecodedCount = 0;
+
+  public getPacketMetrics() {
+    return {
+      packetsReceived: this.packetsReceivedCount,
+      packetsDecoded: this.packetsDecodedCount,
+      connected: this.isConnected,
+      topicsCount: this.subscribedTopics.size,
+    };
+  }
 
   constructor(sessionToken: string) {
     this.sessionToken = sessionToken;
@@ -482,8 +615,12 @@ export class GrowwFeed {
     let rawBuffer: Uint8Array;
     if (typeof data === "string") {
       rawBuffer = new TextEncoder().encode(data);
+    } else if (data instanceof Uint8Array) {
+      rawBuffer = data;
     } else if (data instanceof ArrayBuffer) {
       rawBuffer = new Uint8Array(data);
+    } else if (typeof Buffer !== "undefined" && Buffer.isBuffer(data)) {
+      rawBuffer = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
     } else if (typeof Blob !== "undefined" && data instanceof Blob) {
       const arr = await data.arrayBuffer();
       rawBuffer = new Uint8Array(arr);
@@ -491,13 +628,16 @@ export class GrowwFeed {
       return;
     }
 
-    const textHeader = new TextDecoder().decode(
-      rawBuffer.subarray(0, Math.min(256, rawBuffer.length)),
-    );
+    this.packetsReceivedCount++;
 
-    if (textHeader.startsWith("INFO ")) {
+    const crlfIndex = findCRLF(rawBuffer);
+    const firstLineEnd = crlfIndex === -1 ? rawBuffer.length : crlfIndex;
+    const firstLine = new TextDecoder().decode(rawBuffer.subarray(0, firstLineEnd));
+    const textHeader = firstLine;
+
+    if (firstLine.startsWith("INFO ")) {
       try {
-        const jsonStr = textHeader.slice(5).split("\r\n")[0];
+        const jsonStr = firstLine.slice(5).trim();
         const info = JSON.parse(jsonStr) as { nonce?: string };
         if (info.nonce && this.keyPair && this.socketJwt) {
           const sig = crypto.sign(null, Buffer.from(info.nonce, "utf8"), this.keyPair.privateKey);
@@ -522,31 +662,42 @@ export class GrowwFeed {
       return;
     }
 
-    if (textHeader.includes("PONG") || textHeader.includes("+OK")) {
-      if (!this.isConnected) {
-        this.isConnected = true;
-        this.isConnecting = false;
-        this.onConnectionChangeCallback?.(
-          "CONNECTED",
-          "Connected to official Groww Feed NATS gateway.",
-        );
+    const isConnAck =
+      textHeader.includes("PONG") || textHeader.includes("+OK") || textHeader.startsWith("PING");
 
-        // Re-subscribe all active topics
-        this.resubscribeAll();
+    if (isConnAck && !this.isConnected) {
+      this.isConnected = true;
+      this.isConnecting = false;
+      this.onConnectionChangeCallback?.(
+        "CONNECTED",
+        "Connected to official Groww Feed NATS gateway.",
+      );
 
-        // Start heartbeat ping
-        if (this.pingInterval) clearInterval(this.pingInterval);
-        this.pingInterval = setInterval(() => {
-          if (this.isConnected && this.ws?.readyState === WebSocket.OPEN) {
-            this.ws.send("PING\r\n");
-          }
-        }, 25000);
+      // Re-subscribe all active topics
+      this.resubscribeAll();
+
+      // Start heartbeat ping
+      if (this.pingInterval) clearInterval(this.pingInterval);
+      this.pingInterval = setInterval(() => {
+        if (this.isConnected && this.ws?.readyState === WebSocket.OPEN) {
+          this.ws.send("PING\r\n");
+        }
+      }, 25000);
+      if (
+        this.pingInterval &&
+        typeof this.pingInterval === "object" &&
+        "unref" in this.pingInterval
+      ) {
+        (this.pingInterval as unknown as { unref: () => void }).unref();
       }
-      return;
     }
 
     if (textHeader.startsWith("PING")) {
       this.ws?.send("PONG\r\n");
+      return;
+    }
+
+    if (textHeader.includes("PONG") || textHeader.includes("+OK")) {
       return;
     }
 
@@ -563,6 +714,7 @@ export class GrowwFeed {
 
       try {
         const parsed = parseStocksSocketResponseProto(payloadBytes);
+        this.packetsDecodedCount++;
 
         if (parsed.stockLivePrice) {
           this.ltpStore.set(subject, parsed.stockLivePrice);
@@ -701,6 +853,13 @@ export class GrowwFeed {
         this.connect();
       }
     }, 5000);
+    if (
+      this.reconnectTimer &&
+      typeof this.reconnectTimer === "object" &&
+      "unref" in this.reconnectTimer
+    ) {
+      (this.reconnectTimer as unknown as { unref: () => void }).unref();
+    }
   }
 
   public disconnect(): void {

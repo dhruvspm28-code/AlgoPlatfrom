@@ -5,7 +5,7 @@
  * Features: Search, sorting, instrument selection, custom list add/remove in localStorage.
  */
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { Search, ArrowUpDown, Star } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { marketDataEngine } from "@/services/market-data-engine";
@@ -13,6 +13,7 @@ import { instrumentMapper } from "@/services/instrument-mapper";
 import { candleAggregator } from "@/services/candle-aggregator";
 import { IndicatorEngine } from "@/services/indicator-engine";
 import { signalEngine } from "@/services/signal-engine";
+import { realtimeBus } from "@/services/realtime-bus";
 import { Input } from "@/components/ui/input";
 
 export type WatchlistGroup = "ALL" | "INDEX" | "BANKING" | "IT" | "AUTO" | "PHARMA" | "CUSTOM";
@@ -65,6 +66,16 @@ export function WatchlistTable({
     });
   };
 
+  // Real-time market tick subscription
+  const [ticksVersion, setTicksVersion] = useState(0);
+
+  useEffect(() => {
+    const unsub = realtimeBus.subscribe("MARKET_TICK", () => {
+      setTicksVersion((v) => v + 1);
+    });
+    return () => unsub();
+  }, []);
+
   const allInstruments = instrumentMapper.getAllWatchlist();
 
   // Filter instruments based on group and search query
@@ -100,9 +111,21 @@ export function WatchlistTable({
     return filteredList.map((inst) => {
       const tick = marketDataEngine.getLatestTick(inst.symbol);
       const ltp = tick ? tick.price : inst.basePrice;
-      const change = tick ? tick.change : 0;
-      const changePct = tick ? tick.changePct : 0;
+      const prevClose = tick?.previousClose || tick?.prevClose || inst.basePrice;
+      const change = Number((ltp - prevClose).toFixed(2));
+      const changePct = prevClose > 0 ? Number((((ltp - prevClose) / prevClose) * 100).toFixed(2)) : 0;
+      const dayHigh = tick && tick.high > 0 ? tick.high : ltp;
+      const dayLow = tick && tick.low > 0 ? tick.low : ltp;
       const volume = tick ? tick.volume : 0;
+      const lastTickTime = tick?.timestamp
+        ? new Date(tick.timestamp).toLocaleTimeString("en-IN", {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: false,
+          })
+        : "--";
+      const marketStatus = tick?.status === "LIVE" ? "LIVE" : "OPEN";
 
       // Quick indicator assessment
       const candles = candleAggregator.getCandles(inst.symbol, "15m");
@@ -114,7 +137,11 @@ export function WatchlistTable({
         ltp,
         change,
         changePct,
+        dayHigh,
+        dayLow,
         volume,
+        lastTickTime,
+        marketStatus,
         vwap: ind.vwap.value,
         rsi: ind.rsi14.value,
         supertrend: ind.supertrend.value.trend,
@@ -123,7 +150,7 @@ export function WatchlistTable({
         isCustom: customSymbols.includes(inst.symbol),
       };
     });
-  }, [filteredList, customSymbols]);
+  }, [filteredList, customSymbols, ticksVersion]);
 
   // Sort list
   const sortedList = useMemo(() => {
@@ -218,24 +245,25 @@ export function WatchlistTable({
                 className="py-2 px-2 text-right cursor-pointer hover:text-foreground select-none"
               >
                 <div className="flex items-center justify-end gap-1">
+                  <span>Chg ₹</span>
+                </div>
+              </th>
+              <th
+                onClick={() => handleSort("changePct")}
+                className="py-2 px-2 text-right cursor-pointer hover:text-foreground select-none"
+              >
+                <div className="flex items-center justify-end gap-1">
                   <span>Chg %</span>
                   <ArrowUpDown className="h-2.5 w-2.5" />
                 </div>
               </th>
               {!compact && (
                 <>
-                  <th className="py-2 px-2 text-right">VWAP</th>
-                  <th
-                    onClick={() => handleSort("rsi")}
-                    className="py-2 px-2 text-right cursor-pointer hover:text-foreground select-none"
-                  >
-                    <div className="flex items-center justify-end gap-1">
-                      <span>RSI</span>
-                      <ArrowUpDown className="h-2.5 w-2.5" />
-                    </div>
-                  </th>
-                  <th className="py-2 px-2 text-center">Trend</th>
-                  <th className="py-2 px-2 text-center">Signal</th>
+                  <th className="py-2 px-2 text-right">High</th>
+                  <th className="py-2 px-2 text-right">Low</th>
+                  <th className="py-2 px-2 text-right">Volume</th>
+                  <th className="py-2 px-2 text-right">Last Tick</th>
+                  <th className="py-2 px-2 text-center">Status</th>
                 </>
               )}
             </tr>
@@ -244,7 +272,7 @@ export function WatchlistTable({
             {sortedList.length === 0 ? (
               <tr>
                 <td
-                  colSpan={compact ? 4 : 8}
+                  colSpan={compact ? 4 : 9}
                   className="py-6 text-center text-muted-foreground text-xs"
                 >
                   No instruments matching filters.
@@ -302,6 +330,16 @@ export function WatchlistTable({
 
                     <td
                       className={cn(
+                        "py-2 px-2 text-right font-semibold",
+                        isBull ? "text-bull" : "text-bear",
+                      )}
+                    >
+                      {isBull ? "+" : ""}
+                      {inst.change.toFixed(2)}
+                    </td>
+
+                    <td
+                      className={cn(
                         "py-2 px-2 text-right font-bold",
                         isBull ? "text-bull" : "text-bear",
                       )}
@@ -313,47 +351,31 @@ export function WatchlistTable({
                     {!compact && (
                       <>
                         <td className="py-2 px-2 text-right text-muted-foreground">
-                          ₹{inst.vwap ? inst.vwap.toFixed(1) : "--"}
+                          {inst.dayHigh ? inst.dayHigh.toFixed(2) : "--"}
                         </td>
 
-                        <td
-                          className={cn(
-                            "py-2 px-2 text-right font-semibold",
-                            inst.rsi > 70
-                              ? "text-bear font-bold"
-                              : inst.rsi < 30
-                                ? "text-bull font-bold"
-                                : "text-foreground",
-                          )}
-                        >
-                          {inst.rsi ? inst.rsi.toFixed(1) : "--"}
+                        <td className="py-2 px-2 text-right text-muted-foreground">
+                          {inst.dayLow ? inst.dayLow.toFixed(2) : "--"}
                         </td>
 
-                        <td className="py-2 px-2 text-center">
-                          <span
-                            className={cn(
-                              "text-[10px] font-bold px-1.5 py-0.5 rounded",
-                              inst.supertrend === "BULLISH"
-                                ? "bg-bull/10 text-bull"
-                                : "bg-bear/10 text-bear",
-                            )}
-                          >
-                            {inst.supertrend || "NEUTRAL"}
-                          </span>
+                        <td className="py-2 px-2 text-right text-muted-foreground">
+                          {inst.volume > 0 ? inst.volume.toLocaleString("en-IN") : "--"}
+                        </td>
+
+                        <td className="py-2 px-2 text-right text-[10px] font-mono text-muted-foreground">
+                          {inst.lastTickTime}
                         </td>
 
                         <td className="py-2 px-2 text-center">
                           <span
                             className={cn(
-                              "text-[10px] font-bold px-1.5 py-0.5 rounded",
-                              inst.signal === "BUY"
-                                ? "bg-bull text-bull-foreground"
-                                : inst.signal === "SELL"
-                                  ? "bg-bear text-bear-foreground"
-                                  : "bg-surface-3 text-muted-foreground",
+                              "text-[9px] font-bold px-1.5 py-0.5 rounded",
+                              inst.marketStatus === "LIVE"
+                                ? "bg-bull/15 text-bull border border-bull/30"
+                                : "bg-surface-3 text-muted-foreground",
                             )}
                           >
-                            {inst.signal}
+                            {inst.marketStatus}
                           </span>
                         </td>
                       </>

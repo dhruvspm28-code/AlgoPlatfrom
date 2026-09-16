@@ -78,6 +78,7 @@ export class GrowwMarketDataProvider {
       this.credentials = {
         apiKey: proc.env["GROWW_API_KEY"]?.trim(),
         apiSecret: proc.env["GROWW_API_SECRET"]?.trim(),
+        accessToken: proc.env["GROWW_ACCESS_TOKEN"]?.trim(),
       };
     }
   }
@@ -86,12 +87,25 @@ export class GrowwMarketDataProvider {
    * Configure credentials programmatically for server environment or tests.
    */
   public configureCredentials(creds: GrowwCredentials) {
-    const apiKey = creds.apiKey || creds.accessToken;
-    const apiSecret = creds.apiSecret || creds.clientId;
-    this.credentials = { ...this.credentials, ...creds, apiKey, apiSecret };
-    if (!this.credentials.apiKey || !this.credentials.apiSecret) {
+    const isAccessTokenMode =
+      (creds.accessToken && !creds.apiKey) ||
+      (typeof process !== "undefined" && process.env?.GROWW_AUTH_MODE === "access_token");
+
+    this.credentials = { ...this.credentials, ...creds };
+    if (isAccessTokenMode) {
+      if (!this.credentials.accessToken) {
+        this.updateState("CONFIG_ERROR");
+      } else if (this.connectionState === "CONFIG_ERROR" || this.connectionState === "AUTH_ERROR") {
+        this.updateState("CONNECTED");
+      }
+      return;
+    }
+
+    const apiKey = creds.apiKey;
+    const apiSecret = creds.apiSecret;
+    if (!apiKey || !apiSecret) {
       this.updateState("CONFIG_ERROR");
-    } else if (this.credentials.apiKey === "INVALID_KEY") {
+    } else if (apiKey === "INVALID_KEY") {
       this.updateState("AUTH_ERROR", "AUTH ERROR: Invalid Groww API key provided.");
     } else if (this.connectionState === "CONFIG_ERROR" || this.connectionState === "AUTH_ERROR") {
       this.updateState("CONNECTED");
@@ -246,7 +260,11 @@ export class GrowwMarketDataProvider {
           if (res.ok) {
             const status = await res.json();
             if (status.growwConfigured) {
-              this.updateState(status.connectionState, status.provenanceText);
+              const effectiveState =
+                status.connectionState === "LIVE" && this.genuineTicksReceived === 0
+                  ? "WAITING_FOR_DATA"
+                  : status.connectionState;
+              this.updateState(effectiveState, status.provenanceText);
               this.connectBrowserStream();
               return;
             } else {
@@ -263,10 +281,14 @@ export class GrowwMarketDataProvider {
       }
 
       // 2. Node.js environment check (Tests or direct Server execution)
-      if (!this.credentials.apiKey || !this.credentials.apiSecret) {
+      const hasAccessToken =
+        !!this.credentials.accessToken && this.credentials.accessToken.length > 20;
+      const hasKeySecret = !!this.credentials.apiKey && !!this.credentials.apiSecret;
+
+      if (!hasAccessToken && !hasKeySecret) {
         this.updateState(
           "CONFIG_ERROR",
-          "CONFIG ERROR: GROWW_API_KEY or GROWW_API_SECRET missing in .env.",
+          "CONFIG ERROR: GROWW_ACCESS_TOKEN or (GROWW_API_KEY and GROWW_API_SECRET) missing.",
         );
         return;
       }
@@ -288,10 +310,12 @@ export class GrowwMarketDataProvider {
       }
 
       // 4. Authenticate with official Groww API to get session token
-      this.activeSessionToken = await GrowwAPI.getAccessToken(
-        this.credentials.apiKey,
-        this.credentials.apiSecret,
-      );
+      this.activeSessionToken = await GrowwAPI.resolveSessionToken({
+        authMode: hasAccessToken && !this.credentials.apiKey ? "access_token" : "api_key_secret",
+        accessToken: this.credentials.accessToken,
+        apiKey: this.credentials.apiKey,
+        apiSecret: this.credentials.apiSecret,
+      });
 
       // 5. Initialize official GrowwFeed NATS client
       this.feed = new GrowwFeed(this.activeSessionToken);
@@ -351,7 +375,16 @@ export class GrowwMarketDataProvider {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("403")) {
+      const isSessionApproval =
+        (err as unknown as { code?: string })?.code === "SESSION_APPROVAL_REQUIRED" ||
+        msg.toLowerCase().includes("session approval");
+
+      if (isSessionApproval) {
+        this.updateState(
+          "AUTH_ERROR",
+          "GROWW AUTH ERROR: Session approval required before generating token. Please approve session in Groww Developer Portal.",
+        );
+      } else if (msg.includes("403")) {
         this.updateState(
           "AUTH_ERROR",
           "GROWW ACCESS FORBIDDEN (403): Live market-data scope permission is required on your Groww developer account.",
@@ -442,6 +475,12 @@ export class GrowwMarketDataProvider {
     this.onTickCallback?.(tick);
   }
 
+  private serverMetrics: unknown = null;
+
+  public getServerMetrics() {
+    return this.serverMetrics;
+  }
+
   private connectBrowserStream(): void {
     if (typeof EventSource === "undefined") return;
     if (this.eventSource) {
@@ -454,12 +493,22 @@ export class GrowwMarketDataProvider {
         try {
           const data = JSON.parse(event.data);
           if (data.type === "STATUS") {
-            this.updateState(data.status.connectionState, data.status.provenanceText);
+            if (data.status.metrics) {
+              this.serverMetrics = data.status.metrics;
+            }
+            const effectiveState =
+              data.status.connectionState === "LIVE" && this.genuineTicksReceived === 0
+                ? "WAITING_FOR_DATA"
+                : data.status.connectionState;
+            this.updateState(effectiveState, data.status.provenanceText);
           } else if (data.symbol && data.price) {
             const tick: NormalizedTick = data;
             this.genuineTicksReceived++;
             this.lastVerifiedSnapshot.set(tick.symbol, tick);
-            if (tick.status === "LIVE" && this.connectionState !== "LIVE") {
+            if (tick.timestamp) {
+              this.lastTickLatencyMs = Math.max(0, Date.now() - new Date(tick.timestamp).getTime());
+            }
+            if (this.connectionState !== "LIVE") {
               this.updateState("LIVE");
             }
             this.onTickCallback?.(tick);
@@ -508,6 +557,23 @@ export class GrowwMarketDataProvider {
       this.updateState("LIVE");
     }
     this.onTickCallback?.(tick);
+  }
+
+  public async reconnect(): Promise<void> {
+    const isBrowser = typeof window !== "undefined" && typeof window.document !== "undefined";
+    if (isBrowser) {
+      try {
+        await fetch("/api/market-data/reconnect", { method: "POST" });
+        await this.connect();
+      } catch (err) {
+        console.error("Groww reconnect failed:", err);
+      }
+      return;
+    }
+    this.disconnect();
+    this.reconnectAttempts = 0;
+    this.genuineTicksReceived = 0;
+    await this.connect();
   }
 
   public _resetForTesting(): void {

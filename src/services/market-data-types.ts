@@ -13,20 +13,29 @@ export type FeedConnectionState =
   | "LIVE"
   | "STALE"
   | "DISCONNECTED"
-  | "MARKET_CLOSED";
+  | "MARKET_CLOSED"
+  | "DATA_UNAVAILABLE";
 
 export type MarketSessionState =
-  "PRE-MARKET" | "MARKET OPEN" | "MARKET CLOSED" | "POST-MARKET" | "DATA UNAVAILABLE";
+  | "PRE-MARKET"
+  | "MARKET OPEN"
+  | "MARKET CLOSED"
+  | "POST-MARKET"
+  | "DATA UNAVAILABLE";
 
 export interface NormalizedTick {
   symbol: string;
   exchange: "NSE" | "BSE";
   instrumentId: string;
+  securityId?: string;
   price: number;
+  ltp?: number;
   open: number;
   high: number;
   low: number;
   previousClose: number;
+  prevClose?: number;
+  close?: number;
   change: number;
   changePct: number;
   volume: number;
@@ -62,4 +71,7 @@ export interface FeedStatus {
   provenanceText: string;
   latencyMs?: number;
   subscribedCount?: number;
+  authMode?: "api_key_secret" | "access_token";
+  authReason?: "SESSION_APPROVAL_REQUIRED" | "INVALID_CREDENTIALS" | "NONE" | string;
+  authenticated?: boolean;
 }

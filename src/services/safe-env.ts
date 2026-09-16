@@ -2,8 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 
 export interface SafeEnvStatus {
+  growwAuthMode: "ACCESS_TOKEN" | "API_KEY_SECRET";
   growwApiKey: boolean;
   growwApiSecret: boolean;
+  growwAccessToken: boolean;
+  growwConfigured: boolean;
   emailOtpConfigured: boolean;
   emailOtpProvider: string;
   smsOtpConfigured: boolean;
@@ -21,6 +24,8 @@ export function checkEnvConfigured(): SafeEnvStatus {
   }
 
   // 2. Fallback: manual parse of server .env if not in process.env
+  let authModeRaw = (process.env.GROWW_AUTH_MODE || "").trim().toLowerCase();
+  let accessToken = process.env.GROWW_ACCESS_TOKEN;
   let apiKey = process.env.GROWW_API_KEY;
   let apiSecret = process.env.GROWW_API_SECRET;
   let emailProvider = process.env.EMAIL_OTP_PROVIDER || process.env.OTP_PROVIDER || "";
@@ -44,7 +49,20 @@ export function checkEnvConfigured(): SafeEnvStatus {
     const content = fs.readFileSync(envPath, "utf8");
     for (const line of content.split("\n")) {
       const trimmed = line.trim();
-      if (trimmed.startsWith("GROWW_API_KEY=")) {
+      if (trimmed.startsWith("GROWW_AUTH_MODE=")) {
+        authModeRaw = trimmed
+          .slice("GROWW_AUTH_MODE=".length)
+          .replace(/^["']|["']$/g, "")
+          .trim()
+          .toLowerCase();
+        process.env.GROWW_AUTH_MODE = authModeRaw;
+      } else if (trimmed.startsWith("GROWW_ACCESS_TOKEN=")) {
+        accessToken = trimmed
+          .slice("GROWW_ACCESS_TOKEN=".length)
+          .replace(/^["']|["']$/g, "")
+          .trim();
+        process.env.GROWW_ACCESS_TOKEN = accessToken;
+      } else if (trimmed.startsWith("GROWW_API_KEY=")) {
         apiKey = trimmed
           .slice("GROWW_API_KEY=".length)
           .replace(/^["']|["']$/g, "")
@@ -137,6 +155,16 @@ export function checkEnvConfigured(): SafeEnvStatus {
     }
   }
 
+  const isAccessTokenMode =
+    authModeRaw === "access_token" ||
+    (!authModeRaw && !apiKey && !!accessToken && accessToken.length > 20);
+
+  const hasAccessToken = !!accessToken && accessToken.length > 20;
+  const hasApiKey = !!apiKey && apiKey.length > 10;
+  const hasApiSecret = !!apiSecret && apiSecret.length > 5;
+
+  const isGrowwConfigured = isAccessTokenMode ? hasAccessToken : hasApiKey && hasApiSecret;
+
   const isEmailConfigured =
     emailProvider.toLowerCase() === "mock" || (!!emailApiKey && emailApiKey.length > 10);
 
@@ -152,13 +180,86 @@ export function checkEnvConfigured(): SafeEnvStatus {
       : !!smsApiKey && smsApiKey.length > 8);
 
   return {
-    growwApiKey: !!apiKey && apiKey.length > 10,
-    growwApiSecret: !!apiSecret && apiSecret.length > 5,
+    growwAuthMode: isAccessTokenMode ? "ACCESS_TOKEN" : "API_KEY_SECRET",
+    growwApiKey: hasApiKey,
+    growwApiSecret: hasApiSecret,
+    growwAccessToken: hasAccessToken,
+    growwConfigured: isGrowwConfigured,
     emailOtpConfigured: isEmailConfigured,
     emailOtpProvider: emailProvider || "unconfigured",
     smsOtpConfigured: isSmsConfigured,
     smsOtpProvider: smsProvider || "firebase",
   };
+}
+
+export interface GrowwSafeStatus {
+  provider: string;
+  authMode: "ACCESS_TOKEN" | "API_KEY_SECRET";
+  configuration: "CONFIGURED" | "MISSING";
+  authentication: "READY" | "SESSION_APPROVAL_REQUIRED" | "INVALID" | "UNAUTHENTICATED";
+  marketSession: "OPEN" | "CLOSED";
+  liveData: "READY" | "WAITING_FOR_DATA" | "LIVE" | "BLOCKED" | "UNAVAILABLE";
+  reason: string;
+}
+
+export function calculateMarketSessionInIST(): "OPEN" | "CLOSED" {
+  const now = new Date();
+  const istOffset = 5.5 * 60 * 60 * 1000;
+  const istTime = new Date(now.getTime() + istOffset);
+
+  const day = istTime.getUTCDay();
+  const hours = istTime.getUTCHours();
+  const mins = istTime.getUTCMinutes();
+  const timeInMins = hours * 60 + mins;
+
+  if (day === 0 || day === 6) return "CLOSED";
+  if (timeInMins >= 555 && timeInMins <= 930) return "OPEN";
+  return "CLOSED";
+}
+
+export function getGrowwSafeStatus(): GrowwSafeStatus {
+  const env = checkEnvConfigured();
+  const marketSession = calculateMarketSessionInIST();
+
+  if (!env.growwConfigured) {
+    return {
+      provider: "Groww Trade Gateway",
+      authMode: env.growwAuthMode,
+      configuration: "MISSING",
+      authentication: "UNAUTHENTICATED",
+      marketSession,
+      liveData: "UNAVAILABLE",
+      reason:
+        env.growwAuthMode === "ACCESS_TOKEN"
+          ? "GROWW_ACCESS_TOKEN missing in server .env"
+          : "GROWW_API_KEY or GROWW_API_SECRET missing in server .env",
+    };
+  }
+
+  return {
+    provider: "Groww Trade Gateway",
+    authMode: env.growwAuthMode,
+    configuration: "CONFIGURED",
+    authentication: "READY",
+    marketSession,
+    liveData: "READY",
+    reason:
+      env.growwAuthMode === "ACCESS_TOKEN"
+        ? "Direct Groww Access Token configured"
+        : "Groww API credentials configured for token exchange",
+  };
+}
+
+export function printGrowwDiagnostics(): void {
+  const status = getGrowwSafeStatus();
+  console.log("SmartQuant Edge — Groww Diagnostics\n");
+  console.log(`Provider: ${status.provider}`);
+  console.log(`Auth Mode: ${status.authMode}`);
+  console.log(`Credentials: ${status.configuration}`);
+  console.log(`Authentication: ${status.authentication}`);
+  console.log(`Market Session: ${status.marketSession}`);
+  console.log(`Live Data: ${status.liveData}`);
+  console.log(`Reason: ${status.reason}`);
 }
 
 export interface SmsSafeStatus {
@@ -198,8 +299,12 @@ export function printSafeStatusReport(): void {
 // If executed directly
 if (
   process.argv[1]?.includes("safe-env") ||
-  process.argv[1]?.includes("check-sms") ||
+  process.argv[1]?.includes("check-groww") ||
   import.meta.url === `file://${process.argv[1]}`
 ) {
-  printSafeStatusReport();
+  if (process.argv[1]?.includes("check-sms")) {
+    printSafeStatusReport();
+  } else {
+    printGrowwDiagnostics();
+  }
 }

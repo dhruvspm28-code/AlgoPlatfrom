@@ -18,8 +18,13 @@ export interface PaperPosition {
   quantity?: number;
   avgPrice: number;
   currentPrice: number;
+  ltp?: number;
+  investedValue?: number;
+  currentValue?: number;
   pnl: number;
   pnlPct: number;
+  dayPnl?: number;
+  dayPnlPct?: number;
   strategyId?: string;
   stopLoss?: number;
   target?: number;
@@ -78,31 +83,37 @@ class PaperBroker {
       {
         symbol: "RELIANCE",
         side: "LONG",
-        qty: 120,
-        avgPrice: 2941.0,
-        currentPrice: 2984.4,
-        pnl: 5208,
-        pnlPct: 1.48,
+        qty: 25,
+        avgPrice: 1245.0,
+        currentPrice: 1250.7,
+        pnl: 142.5,
+        pnlPct: 0.46,
+        stopLoss: 1210.0,
+        target: 1320.0,
         updatedAt: new Date().toISOString(),
       },
       {
         symbol: "ICICIBANK",
         side: "LONG",
-        qty: 50,
-        avgPrice: 1260.0,
-        currentPrice: 1284.05,
-        pnl: 1202.5,
-        pnlPct: 1.91,
+        qty: 30,
+        avgPrice: 1348.0,
+        currentPrice: 1351.6,
+        pnl: 108.0,
+        pnlPct: 0.27,
+        stopLoss: 1310.0,
+        target: 1420.0,
         updatedAt: new Date().toISOString(),
       },
       {
         symbol: "TCS",
         side: "SHORT",
-        qty: 25,
-        avgPrice: 4160.0,
-        currentPrice: 4128.75,
-        pnl: 781.25,
-        pnlPct: 0.75,
+        qty: 15,
+        avgPrice: 2220.0,
+        currentPrice: 2214.5,
+        pnl: 82.5,
+        pnlPct: 0.25,
+        stopLoss: 2260.0,
+        target: 2150.0,
         updatedAt: new Date().toISOString(),
       },
     ]);
@@ -141,16 +152,32 @@ class PaperBroker {
     return Array.from(this.positions.values()).map((pos) => {
       const latestTick = marketDataEngine.getLatestTick(pos.symbol);
       const ltp = latestTick ? latestTick.price : pos.currentPrice;
-      const diff = pos.side === "LONG" ? ltp - pos.avgPrice : pos.avgPrice - ltp;
-      const pnl = Number((pos.qty * diff).toFixed(2));
-      const pnlPct = Number(((diff / pos.avgPrice) * 100).toFixed(2));
+      const prevClose = latestTick?.previousClose || latestTick?.prevClose || pos.avgPrice;
+
+      // Canonical Long / Short Valuation Formulas
+      const isLong = pos.side === "LONG";
+      const priceDiff = isLong ? ltp - pos.avgPrice : pos.avgPrice - ltp;
+      const unrealizedPnl = Number((pos.qty * priceDiff).toFixed(2));
+      const pnlPct = Number(((priceDiff / pos.avgPrice) * 100).toFixed(2));
+      const investedValue = Number((pos.qty * pos.avgPrice).toFixed(2));
+      const currentValue = Number((pos.qty * ltp).toFixed(2));
+
+      // Day P&L
+      const dayDiff = isLong ? ltp - prevClose : prevClose - ltp;
+      const dayPnl = Number((pos.qty * dayDiff).toFixed(2));
+      const dayPnlPct = Number(((dayDiff / prevClose) * 100).toFixed(2));
 
       return {
         ...pos,
         quantity: pos.qty,
         currentPrice: ltp,
-        pnl,
+        ltp,
+        investedValue,
+        currentValue,
+        pnl: unrealizedPnl,
         pnlPct,
+        dayPnl,
+        dayPnlPct,
       };
     });
   }
@@ -166,7 +193,8 @@ class PaperBroker {
   public getPortfolio(): PaperPortfolio {
     const currentPositions = this.getPositions();
     const unrealisedPnl = currentPositions.reduce((acc, p) => acc + p.pnl, 0);
-    const investedCapital = currentPositions.reduce((acc, p) => acc + p.qty * p.avgPrice, 0);
+    const investedCapital = currentPositions.reduce((acc, p) => acc + (p.investedValue ?? p.qty * p.avgPrice), 0);
+    const totalDayPnl = currentPositions.reduce((acc, p) => acc + (p.dayPnl ?? 0), 0);
     const totalPortfolioValue = this.cashBalance + investedCapital + unrealisedPnl;
 
     return {
@@ -175,7 +203,7 @@ class PaperBroker {
       totalPortfolioValue,
       unrealisedPnl,
       realisedPnl: this.realisedPnl,
-      todayPnl: this.realisedPnl + unrealisedPnl,
+      todayPnl: totalDayPnl,
     };
   }
 

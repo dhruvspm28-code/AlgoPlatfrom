@@ -158,6 +158,72 @@ class CandleAggregator {
       }
     }
   }
+
+  public mergeHistoricalAndLive(
+    historical: Candle[],
+    liveCandles: Candle[],
+  ): Candle[] {
+    return mergeHistoricalAndLiveCandles(historical, liveCandles);
+  }
+}
+
+/**
+ * Deterministically merges historical candles with live session candles.
+ * - Deduplicates overlapping timestamps
+ * - Preserves historical sequence
+ * - Continuously updates the latest candle with genuine live ticks
+ * - Strictly sorts chronologically
+ */
+export function mergeHistoricalAndLiveCandles(
+  historical: Candle[],
+  liveCandles: Candle[],
+): Candle[] {
+  if (!historical || historical.length === 0) {
+    return [...(liveCandles || [])];
+  }
+  if (!liveCandles || liveCandles.length === 0) {
+    return [...historical];
+  }
+
+  // Clone historical candles and sort chronologically
+  const result = [...historical].sort((a, b) => a.openTime - b.openTime);
+
+  for (const l of liveCandles) {
+    const tf = l.timeframe || "15m";
+
+    // 1. Exact match on openTime
+    let matchIdx = result.findIndex((h) => h.openTime === l.openTime);
+
+    // 2. Same-day match for 1D timeframe
+    if (matchIdx === -1 && tf === "1D") {
+      const lDate = new Date(l.openTime).toDateString();
+      matchIdx = result.findIndex((h) => new Date(h.openTime).toDateString() === lDate);
+    }
+
+    // 3. Interval match within candle span [openTime, closeTime)
+    if (matchIdx === -1) {
+      matchIdx = result.findIndex(
+        (h) => l.openTime >= h.openTime && l.openTime < (h.closeTime || h.openTime + (TIMEFRAME_MINUTES[tf] || 15) * 60000),
+      );
+    }
+
+    if (matchIdx >= 0) {
+      const existing = result[matchIdx];
+      result[matchIdx] = {
+        ...existing,
+        high: Number(Math.max(existing.high, l.high).toFixed(2)),
+        low: Number(Math.min(existing.low, l.low).toFixed(2)),
+        close: l.close,
+        volume: Math.max(existing.volume, l.volume),
+        isClosed: false,
+      };
+    } else {
+      result.push({ ...l });
+    }
+  }
+
+  result.sort((a, b) => a.openTime - b.openTime);
+  return result;
 }
 
 export const candleAggregator = new CandleAggregator();

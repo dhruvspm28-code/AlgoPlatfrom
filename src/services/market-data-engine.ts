@@ -32,6 +32,7 @@ class MarketDataEngine {
   private ticksMap = new Map<string, NormalizedTick>();
   private staleTimerId: ReturnType<typeof setInterval> | null = null;
   private isStale = false;
+  private realtimeEventsPublished = 0;
 
   constructor() {
     this.init();
@@ -107,6 +108,18 @@ class MarketDataEngine {
     });
   }
 
+  /** Trigger reconnect on active provider */
+  public async reconnect(): Promise<void> {
+    const provider = this.getActiveProvider();
+    if (typeof (provider as unknown as { reconnect?: () => Promise<void> }).reconnect === "function") {
+      await (provider as unknown as { reconnect: () => Promise<void> }).reconnect();
+    } else {
+      provider.disconnect();
+      await provider.connect();
+    }
+    realtimeBus.emit("FEED_STATUS_CHANGED", this.getFeedStatus());
+  }
+
   /** Callback invoked when a genuine normalized tick arrives */
   public onTickReceived(tick: NormalizedTick) {
     this.lastTickTime = Date.now();
@@ -129,8 +142,14 @@ class MarketDataEngine {
     // Feed tick to Candle Aggregator across all 6 timeframes
     candleAggregator.addTick(tick);
 
+    this.realtimeEventsPublished++;
+
     // Publish normalized tick to global Real-Time Event Bus
     realtimeBus.emit("MARKET_TICK", tick);
+  }
+
+  public getRealtimeEventsCount(): number {
+    return this.realtimeEventsPublished;
   }
 
   public getLatestTick(symbol: string): NormalizedTick | undefined {
@@ -156,7 +175,9 @@ class MarketDataEngine {
     const isNowStale = this.lastTickTime > 0 && elapsedSec > STALE_THRESHOLD_SEC;
 
     let effectiveState: FeedConnectionState = currentState;
-    if (currentState === "LIVE" && isNowStale) {
+    if (currentState === "LIVE" && this.lastTickTime === 0) {
+      effectiveState = "WAITING_FOR_DATA";
+    } else if (currentState === "LIVE" && isNowStale) {
       effectiveState = "STALE";
     }
 

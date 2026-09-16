@@ -52,6 +52,7 @@ import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { indices } from "@/data/market";
 import { marketDataEngine } from "@/services/market-data-engine";
+import { realtimeBus } from "@/services/realtime-bus";
 import { CommandPalette } from "@/components/trading/CommandPalette";
 
 interface NavItem {
@@ -703,31 +704,40 @@ const MARKET_STRIP_ITEMS = [
   {
     name: "NIFTY 50",
     symbol: "NIFTY 50",
-    defaultVal: 24812.35,
-    defaultChg: 186.4,
-    defaultPct: 0.76,
+    defaultVal: 23218.9,
+    defaultChg: -258.9,
+    defaultPct: -1.1,
   },
-  { name: "SENSEX", symbol: "SENSEX", defaultVal: 81428.9, defaultChg: 542.1, defaultPct: 0.67 },
+  { name: "SENSEX", symbol: "SENSEX", defaultVal: 74312.94, defaultChg: -589.65, defaultPct: -0.79 },
   {
     name: "BANK NIFTY",
     symbol: "BANK NIFTY",
-    defaultVal: 53104.2,
-    defaultChg: -128.6,
-    defaultPct: -0.24,
+    defaultVal: 56192.8,
+    defaultChg: -279.15,
+    defaultPct: -0.49,
   },
-  { name: "NIFTY IT", symbol: "TCS", defaultVal: 41850.5, defaultChg: 310.2, defaultPct: 0.75 },
+  { name: "NIFTY IT", symbol: "TCS", defaultVal: 2198.4, defaultChg: -5.7, defaultPct: -0.26 },
   {
     name: "NIFTY FIN",
     symbol: "HDFCBANK",
-    defaultVal: 23640.8,
-    defaultChg: 88.4,
-    defaultPct: 0.38,
+    defaultVal: 717.7,
+    defaultChg: 23.9,
+    defaultPct: 3.44,
   },
-  { name: "USD/INR", symbol: "USDINR", defaultVal: 83.92, defaultChg: -0.04, defaultPct: -0.05 },
+  { name: "USD/INR", symbol: "USDINR", defaultVal: 84.15, defaultChg: 0.02, defaultPct: 0.02 },
 ];
 
 function CenterMarketTicker() {
   const { feedStatus } = usePlatform();
+  const [, setTickVer] = useState(0);
+
+  useEffect(() => {
+    const unsub = realtimeBus.subscribe("MARKET_TICK", () => {
+      setTickVer((v) => v + 1);
+    });
+    return () => unsub();
+  }, []);
+
   const isOffline =
     feedStatus.connectionState === "DISCONNECTED" ||
     feedStatus.connectionState === "CONFIG_ERROR" ||

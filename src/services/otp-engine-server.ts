@@ -41,6 +41,7 @@ export interface OtpDeliveryResponse {
   providerName?: string;
   state: OtpLifecycleState;
   isDemo?: boolean;
+  testOtp?: string;
 }
 
 export interface OtpVerificationResponse {
@@ -666,17 +667,21 @@ export class ServerOtpEngine {
       "+91 98765 43210",
       "sqe-8k92m4",
       "vikram@shettyalgo.in",
+      "9811122334",
+      "+91 98111 22334",
       "9811122233",
       "+91 98111 22233",
       "sqe-3n56p8",
       "priya@menonquant.in",
+      "9845011223",
+      "+91 98450 11223",
       "9899988776",
       "+91 98999 88776",
     ];
     return demoIdentifiers.some((d) => norm.includes(d) || d.includes(norm));
   }
 
-  private recordDemoToken(target: string, rawOtp: string): void {
+  public recordDemoToken(target: string, rawOtp: string): void {
     const norm = target.trim().toLowerCase();
     const digits = target.replace(/[^0-9]/g, "");
     this.demoTokenStore.set(norm, rawOtp);
@@ -688,17 +693,27 @@ export class ServerOtpEngine {
       this.demoTokenStore.set("9876543210", rawOtp);
       this.demoTokenStore.set("+91 98765 43210", rawOtp);
     } else if (
+      digits.includes("9811122334") ||
       digits.includes("9811122233") ||
       norm.includes("shetty") ||
       norm.includes("8k92m4")
     ) {
       this.demoTokenStore.set("sqe-8k92m4", rawOtp);
       this.demoTokenStore.set("vikram@shettyalgo.in", rawOtp);
+      this.demoTokenStore.set("9811122334", rawOtp);
+      this.demoTokenStore.set("+91 98111 22334", rawOtp);
       this.demoTokenStore.set("9811122233", rawOtp);
       this.demoTokenStore.set("+91 98111 22233", rawOtp);
-    } else if (digits.includes("9899988776") || norm.includes("menon") || norm.includes("3n56p8")) {
+    } else if (
+      digits.includes("9845011223") ||
+      digits.includes("9899988776") ||
+      norm.includes("menon") ||
+      norm.includes("3n56p8")
+    ) {
       this.demoTokenStore.set("sqe-3n56p8", rawOtp);
       this.demoTokenStore.set("priya@menonquant.in", rawOtp);
+      this.demoTokenStore.set("9845011223", rawOtp);
+      this.demoTokenStore.set("+91 98450 11223", rawOtp);
       this.demoTokenStore.set("9899988776", rawOtp);
       this.demoTokenStore.set("+91 98999 88776", rawOtp);
     }
@@ -886,6 +901,12 @@ export class ServerOtpEngine {
     rate.count += 1;
     this.rateLimits.set(normKey, rate);
 
+    const isDev = typeof process !== "undefined" && process.env.NODE_ENV !== "production";
+    if (isDev) {
+      this.recordDemoToken(normKey, rawOtp);
+    }
+    const testOtp = isDemo || isTestMode || isMock || isDev ? rawOtp : undefined;
+
     return {
       success: true,
       destinationMasked: masked,
@@ -896,6 +917,7 @@ export class ServerOtpEngine {
       providerName,
       state: "OTP_SENT",
       isDemo,
+      testOtp,
     };
   }
 
@@ -1009,11 +1031,12 @@ export class ServerOtpEngine {
    */
   public getDemoToken(target: string): string | undefined {
     const norm = target.trim().toLowerCase();
+    const digits = target.replace(/[^0-9]/g, "");
     const isProd = typeof process !== "undefined" && process.env.NODE_ENV === "production";
     if (isProd && !this.isDemoAccount(norm)) {
       return undefined;
     }
-    return this.demoTokenStore.get(norm);
+    return this.demoTokenStore.get(norm) || (digits ? this.demoTokenStore.get(digits) : undefined);
   }
 
   /** Reset internal cache for test harnesses */

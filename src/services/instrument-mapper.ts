@@ -31,7 +31,7 @@ export const WATCHLIST_INSTRUMENTS: InstrumentMapping[] = [
     growwSymbol: "NIFTY",
     lotSize: 25,
     tickSize: 0.05,
-    basePrice: 24812.35,
+    basePrice: 23477.8,
   },
   {
     symbol: "SENSEX",
@@ -45,7 +45,7 @@ export const WATCHLIST_INSTRUMENTS: InstrumentMapping[] = [
     growwSymbol: "SENSEX",
     lotSize: 10,
     tickSize: 0.05,
-    basePrice: 81350.2,
+    basePrice: 74902.59,
   },
   {
     symbol: "BANK NIFTY",
@@ -59,7 +59,7 @@ export const WATCHLIST_INSTRUMENTS: InstrumentMapping[] = [
     growwSymbol: "BANKNIFTY",
     lotSize: 15,
     tickSize: 0.05,
-    basePrice: 53104.2,
+    basePrice: 56471.95,
   },
   {
     symbol: "RELIANCE",
@@ -73,7 +73,7 @@ export const WATCHLIST_INSTRUMENTS: InstrumentMapping[] = [
     growwSymbol: "RELIANCE",
     lotSize: 1,
     tickSize: 0.05,
-    basePrice: 2984.4,
+    basePrice: 1274.0,
   },
   {
     symbol: "TCS",
@@ -87,7 +87,7 @@ export const WATCHLIST_INSTRUMENTS: InstrumentMapping[] = [
     growwSymbol: "TCS",
     lotSize: 1,
     tickSize: 0.05,
-    basePrice: 4128.75,
+    basePrice: 2204.1,
   },
   {
     symbol: "INFY",
@@ -101,7 +101,7 @@ export const WATCHLIST_INSTRUMENTS: InstrumentMapping[] = [
     growwSymbol: "INFY",
     lotSize: 1,
     tickSize: 0.05,
-    basePrice: 1892.6,
+    basePrice: 1036.5,
   },
   {
     symbol: "HDFCBANK",
@@ -115,7 +115,7 @@ export const WATCHLIST_INSTRUMENTS: InstrumentMapping[] = [
     growwSymbol: "HDFCBANK",
     lotSize: 1,
     tickSize: 0.05,
-    basePrice: 1721.3,
+    basePrice: 693.8,
   },
   {
     symbol: "ICICIBANK",
@@ -129,7 +129,7 @@ export const WATCHLIST_INSTRUMENTS: InstrumentMapping[] = [
     growwSymbol: "ICICIBANK",
     lotSize: 1,
     tickSize: 0.05,
-    basePrice: 1284.05,
+    basePrice: 1384.5,
   },
   {
     symbol: "SBIN",
@@ -143,7 +143,7 @@ export const WATCHLIST_INSTRUMENTS: InstrumentMapping[] = [
     growwSymbol: "SBIN",
     lotSize: 1,
     tickSize: 0.05,
-    basePrice: 842.5,
+    basePrice: 1009.7,
   },
   {
     symbol: "TATAMOTORS",
@@ -157,7 +157,7 @@ export const WATCHLIST_INSTRUMENTS: InstrumentMapping[] = [
     growwSymbol: "TATAMOTORS",
     lotSize: 1,
     tickSize: 0.05,
-    basePrice: 978.8,
+    basePrice: 300.5,
   },
 ];
 

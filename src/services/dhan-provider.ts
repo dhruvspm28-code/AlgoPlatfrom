@@ -652,6 +652,13 @@ export class DhanMarketDataProvider {
     this.reconnectTimer = setTimeout(() => {
       this.connect();
     }, delay);
+    if (
+      this.reconnectTimer &&
+      typeof this.reconnectTimer === "object" &&
+      "unref" in this.reconnectTimer
+    ) {
+      (this.reconnectTimer as unknown as { unref: () => void }).unref();
+    }
   }
 
   public disconnect(): void {

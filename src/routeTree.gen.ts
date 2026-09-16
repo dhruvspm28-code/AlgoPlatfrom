@@ -26,6 +26,7 @@ import { Route as AppIndexRouteImport } from './routes/app.index'
 import { Route as AppAdminRouteImport } from './routes/app.admin'
 import { Route as AppAlertsRouteImport } from './routes/app.alerts'
 import { Route as AppBacktestRouteImport } from './routes/app.backtest'
+import { Route as AppDashboardRouteImport } from './routes/app.dashboard'
 import { Route as AppExecutionReportsRouteImport } from './routes/app.execution-reports'
 import { Route as AppExposureRouteImport } from './routes/app.exposure'
 import { Route as AppInsightsRouteImport } from './routes/app.insights'
@@ -127,6 +128,11 @@ const AppAlertsRoute = AppAlertsRouteImport.update({
 const AppBacktestRoute = AppBacktestRouteImport.update({
   id: '/backtest',
   path: '/backtest',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppDashboardRoute = AppDashboardRouteImport.update({
+  id: '/dashboard',
+  path: '/dashboard',
   getParentRoute: () => AppRoute,
 } as any)
 const AppExecutionReportsRoute = AppExecutionReportsRouteImport.update({
@@ -232,6 +238,7 @@ export interface FileRoutesByFullPath {
   '/app/admin': typeof AppAdminRoute
   '/app/alerts': typeof AppAlertsRoute
   '/app/backtest': typeof AppBacktestRoute
+  '/app/dashboard': typeof AppDashboardRoute
   '/app/execution-reports': typeof AppExecutionReportsRoute
   '/app/exposure': typeof AppExposureRoute
   '/app/insights': typeof AppInsightsRoute
@@ -267,6 +274,7 @@ export interface FileRoutesByTo {
   '/app/admin': typeof AppAdminRoute
   '/app/alerts': typeof AppAlertsRoute
   '/app/backtest': typeof AppBacktestRoute
+  '/app/dashboard': typeof AppDashboardRoute
   '/app/execution-reports': typeof AppExecutionReportsRoute
   '/app/exposure': typeof AppExposureRoute
   '/app/insights': typeof AppInsightsRoute
@@ -304,6 +312,7 @@ export interface FileRoutesById {
   '/app/admin': typeof AppAdminRoute
   '/app/alerts': typeof AppAlertsRoute
   '/app/backtest': typeof AppBacktestRoute
+  '/app/dashboard': typeof AppDashboardRoute
   '/app/execution-reports': typeof AppExecutionReportsRoute
   '/app/exposure': typeof AppExposureRoute
   '/app/insights': typeof AppInsightsRoute
@@ -342,6 +351,7 @@ export interface FileRouteTypes {
     | '/app/admin'
     | '/app/alerts'
     | '/app/backtest'
+    | '/app/dashboard'
     | '/app/execution-reports'
     | '/app/exposure'
     | '/app/insights'
@@ -377,6 +387,7 @@ export interface FileRouteTypes {
     | '/app/admin'
     | '/app/alerts'
     | '/app/backtest'
+    | '/app/dashboard'
     | '/app/execution-reports'
     | '/app/exposure'
     | '/app/insights'
@@ -413,6 +424,7 @@ export interface FileRouteTypes {
     | '/app/admin'
     | '/app/alerts'
     | '/app/backtest'
+    | '/app/dashboard'
     | '/app/execution-reports'
     | '/app/exposure'
     | '/app/insights'
@@ -570,6 +582,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppBacktestRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/dashboard': {
+      id: '/app/dashboard'
+      path: '/dashboard'
+      fullPath: '/app/dashboard'
+      preLoaderRoute: typeof AppDashboardRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/execution-reports': {
       id: '/app/execution-reports'
       path: '/execution-reports'
@@ -696,6 +715,7 @@ interface AppRouteChildren {
   AppAdminRoute: typeof AppAdminRoute
   AppAlertsRoute: typeof AppAlertsRoute
   AppBacktestRoute: typeof AppBacktestRoute
+  AppDashboardRoute: typeof AppDashboardRoute
   AppExecutionReportsRoute: typeof AppExecutionReportsRoute
   AppExposureRoute: typeof AppExposureRoute
   AppInsightsRoute: typeof AppInsightsRoute
@@ -720,6 +740,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppAdminRoute: AppAdminRoute,
   AppAlertsRoute: AppAlertsRoute,
   AppBacktestRoute: AppBacktestRoute,
+  AppDashboardRoute: AppDashboardRoute,
   AppExecutionReportsRoute: AppExecutionReportsRoute,
   AppExposureRoute: AppExposureRoute,
   AppInsightsRoute: AppInsightsRoute,

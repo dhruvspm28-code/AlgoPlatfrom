@@ -63,6 +63,27 @@ export default {
           headers: { "content-type": "application/json", "cache-control": "no-cache" },
         });
       }
+      if (url.pathname === "/api/market-data/reconnect") {
+        const { serverMarketData } = await import("./services/server-market-data");
+        const result = await serverMarketData.reconnect();
+        return new Response(JSON.stringify(result), {
+          status: 200,
+          headers: { "content-type": "application/json", "cache-control": "no-cache" },
+        });
+      }
+      if (url.pathname === "/api/market-data/stream") {
+        const { serverMarketData } = await import("./services/server-market-data");
+        await serverMarketData.start();
+        return serverMarketData.createStreamResponse(request);
+      }
+      if (url.pathname === "/api/market-data/historical") {
+        const { serverMarketData } = await import("./services/server-market-data");
+        return serverMarketData.handleHistoricalRequest(url);
+      }
+      if (url.pathname === "/api/market-data/candles") {
+        const { serverMarketData } = await import("./services/server-market-data");
+        return serverMarketData.handleCandlesRequest(url);
+      }
 
       if (url.pathname === "/api/auth/otp/send" && request.method === "POST") {
         const { serverOtpEngine } = await import("./services/otp-engine-server");
@@ -112,6 +133,16 @@ export default {
       if (url.pathname === "/api/auth/otp/status") {
         const { serverOtpEngine } = await import("./services/otp-engine-server");
         return new Response(JSON.stringify(serverOtpEngine.getProviderStatus()), {
+          status: 200,
+          headers: { "content-type": "application/json", "cache-control": "no-store" },
+        });
+      }
+
+      if (url.pathname === "/api/auth/otp/test-token" || url.pathname === "/api/auth/otp/test-otp") {
+        const { serverOtpEngine } = await import("./services/otp-engine-server");
+        const target = url.searchParams.get("target") || "";
+        const token = serverOtpEngine.getDemoToken(target);
+        return new Response(JSON.stringify({ success: true, testOtp: token }), {
           status: 200,
           headers: { "content-type": "application/json", "cache-control": "no-store" },
         });

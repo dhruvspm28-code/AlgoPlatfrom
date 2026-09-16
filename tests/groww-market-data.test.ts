@@ -15,16 +15,19 @@
  * 11. Official topic routing for equities (/ld/eq/nse/price.{token}) and indices (/ld/indices/...)
  */
 
-import { describe, it, beforeEach } from "node:test";
+import { describe, it, beforeEach, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
 import { GrowwMarketDataProvider, growwProvider } from "../src/services/groww-provider";
 import {
+  GrowwAPI,
   GrowwFeed,
   generateNKeysUserKey,
   parseStocksSocketResponseProto,
   type GrowwInstrument,
 } from "../src/services/groww-feed";
+import { checkEnvConfigured, getGrowwSafeStatus } from "../src/services/safe-env";
+import { serverMarketData } from "../src/services/server-market-data";
 import { marketDataEngine } from "../src/services/market-data-engine";
 import { candleAggregator } from "../src/services/candle-aggregator";
 import { type NormalizedTick } from "../src/services/market-data-types";
@@ -38,6 +41,18 @@ describe("SmartQuant Edge Groww Market Data Provider & Feed", () => {
     provider._resetForTesting();
     marketDataEngine._resetForTesting();
     candleAggregator.clear();
+  });
+
+  afterEach(() => {
+    provider.disconnect();
+    marketDataEngine.getGrowwProvider().disconnect();
+    marketDataEngine.getDhanProvider().disconnect();
+  });
+
+  after(() => {
+    provider.disconnect();
+    marketDataEngine.getGrowwProvider().disconnect();
+    marketDataEngine.getDhanProvider().disconnect();
   });
 
   it("1. should report CONFIG_ERROR when Groww credentials are missing", () => {
@@ -229,5 +244,78 @@ describe("SmartQuant Edge Groww Market Data Provider & Feed", () => {
     assert.equal(idxUnsub["NIFTY"], true);
 
     feed.disconnect();
+  });
+
+  it("12. should resolve access_token directly without calling token exchange", async () => {
+    const directToken = "valid_direct_groww_access_token_jwt_string_123456789";
+    const resolved = await GrowwAPI.resolveSessionToken({
+      authMode: "access_token",
+      accessToken: directToken,
+    });
+    assert.equal(resolved, directToken);
+  });
+
+  it("13. should throw descriptive error when access_token is missing in access_token mode", async () => {
+    await assert.rejects(
+      async () => {
+        await GrowwAPI.resolveSessionToken({
+          authMode: "access_token",
+          accessToken: "",
+        });
+      },
+      {
+        message: /GROWW_ACCESS_TOKEN is missing/,
+      },
+    );
+  });
+
+  it("14. should throw error when apiKey or apiSecret is missing in api_key_secret mode", async () => {
+    await assert.rejects(
+      async () => {
+        await GrowwAPI.resolveSessionToken({
+          authMode: "api_key_secret",
+          apiKey: undefined,
+          apiSecret: undefined,
+        });
+      },
+      {
+        message: /GROWW_API_KEY or GROWW_API_SECRET missing/,
+      },
+    );
+  });
+
+  it("15. should never leak secrets in getGrowwSafeStatus() diagnostics", () => {
+    const status = getGrowwSafeStatus();
+    assert.ok(status.provider);
+    assert.ok(status.authMode);
+    assert.ok(status.configuration);
+    assert.ok(status.authentication);
+    assert.ok(status.marketSession);
+    assert.ok(status.liveData);
+
+    const jsonStr = JSON.stringify(status);
+    if (process.env.GROWW_API_SECRET) {
+      assert.ok(!jsonStr.includes(process.env.GROWW_API_SECRET));
+    }
+    if (process.env.GROWW_ACCESS_TOKEN) {
+      assert.ok(!jsonStr.includes(process.env.GROWW_ACCESS_TOKEN));
+    }
+  });
+
+  it("16. should provide authMode, authReason, authenticated in serverMarketData status", () => {
+    const status = serverMarketData.getStatus();
+    assert.ok(status.authMode);
+    assert.ok(status.authReason);
+    assert.equal(typeof status.authenticated, "boolean");
+    assert.equal(status.provider, "groww");
+  });
+
+  it("17. should support reconnect method on marketDataEngine", async () => {
+    await marketDataEngine.switchProvider("groww");
+    await marketDataEngine.reconnect();
+    const status = marketDataEngine.getFeedStatus();
+    assert.equal(status.provider, "groww");
+    assert.ok(status.connectionState);
+    marketDataEngine.getGrowwProvider().disconnect();
   });
 });

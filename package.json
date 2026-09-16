@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "node --env-file=.env ./node_modules/vite/bin/vite.js dev",
     "check-env": "node --env-file=.env -e \"import('./src/services/safe-env.ts').then(m => { const s = m.checkEnvConfigured(); console.log('GROWW_API_KEY: ' + (s.growwApiKey ? 'CONFIGURED' : 'MISSING')); console.log('GROWW_API_SECRET: ' + (s.growwApiSecret ? 'CONFIGURED' : 'MISSING')); });\"",
+    "check-groww": "node --env-file=.env -e \"import('./src/services/safe-env.ts').then(m => m.printGrowwDiagnostics());\"",
     "check-sms": "node --env-file=.env -e \"import('./src/services/safe-env.ts').then(m => m.printSafeStatusReport());\"",
+    "typecheck": "tsc --noEmit",
+    "test": "node --env-file=.env --import jiti/register --test --test-force-exit tests/groww-market-data.test.ts tests/authentication.test.ts tests/terminal-and-historical.test.ts",
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "preview": "vite preview",

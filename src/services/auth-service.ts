@@ -810,7 +810,7 @@ class AuthService {
     brokerClientId?: string;
     dematUcc?: string;
     channel?: "EMAIL" | "SMS";
-  }): Promise<{ success: boolean; message: string; channel?: "EMAIL" | "SMS" }> {
+  }): Promise<{ success: boolean; message: string; channel?: "EMAIL" | "SMS"; testOtp?: string }> {
     if (!input.name || input.name.trim().length < 2) {
       return { success: false, message: "Enter your full name." };
     }
@@ -865,6 +865,7 @@ class AuthService {
       success: true,
       channel,
       message: `Verification code sent to ${masked}`,
+      testOtp: otpRes.testOtp,
     };
   }
 
@@ -1622,11 +1623,56 @@ class AuthService {
     if (typeof process !== "undefined" && process.env.NODE_ENV === "production") {
       return undefined;
     }
-    const isDemo = isDemoAccount(identifier);
-    if (!isDemo) return undefined;
     const user = this.findUserByIdentifier(identifier);
-    const dest = user ? user.email || user.phone : identifier;
-    return otpProvider._getTestToken(dest);
+    const targets = [
+      identifier,
+      user?.email,
+      user?.phone,
+      user?.userId,
+      user ? user.email || user.phone : undefined,
+    ].filter(Boolean) as string[];
+
+    for (const target of targets) {
+      const token = otpProvider._getTestToken(target);
+      if (token) return token;
+    }
+    return undefined;
+  }
+
+  /** Async lookup that queries the server test-token endpoint if client cache is empty */
+  public async fetchTestOtpAsync(identifier: string): Promise<string | undefined> {
+    const existing = this.getTestOtp(identifier);
+    if (existing) return existing;
+
+    if (typeof window !== "undefined" && typeof fetch === "function") {
+      try {
+        const user = this.findUserByIdentifier(identifier);
+        const targets = [
+          identifier,
+          user?.email,
+          user?.phone,
+          user?.userId,
+          user ? user.email || user.phone : undefined,
+        ].filter(Boolean) as string[];
+
+        for (const target of targets) {
+          const res = await fetch(`/api/auth/otp/test-token?target=${encodeURIComponent(target)}`);
+          if (res.ok) {
+            const data = (await res.json()) as { testOtp?: string };
+            if (data.testOtp) {
+              otpProvider.setClientTestToken(target, data.testOtp);
+              if (user?.email) otpProvider.setClientTestToken(user.email, data.testOtp);
+              if (user?.phone) otpProvider.setClientTestToken(user.phone, data.testOtp);
+              if (user?.userId) otpProvider.setClientTestToken(user.userId, data.testOtp);
+              return data.testOtp;
+            }
+          }
+        }
+      } catch {
+        // Ignore network errors in local lookup
+      }
+    }
+    return undefined;
   }
 
   /** Internal helper for unit testing harness */

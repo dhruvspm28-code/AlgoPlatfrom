@@ -36,6 +36,7 @@ export interface OtpDeliveryResult {
   providerName?: string;
   state?: OtpLifecycleState;
   isDemo?: boolean;
+  testOtp?: string;
 }
 
 export interface OtpVerificationResult {
@@ -77,6 +78,16 @@ export function isDemoAccount(target: string): boolean {
 }
 
 class SmartQuantOtpEngine implements OtpProvider {
+  private clientTestTokens = new Map<string, string>();
+
+  public setClientTestToken(target: string, token: string): void {
+    const norm = target.trim().toLowerCase();
+    this.clientTestTokens.set(norm, token);
+    const digits = target.replace(/[^0-9]/g, "");
+    if (digits) this.clientTestTokens.set(digits, token);
+    serverOtpEngine.recordDemoToken(target, token);
+  }
+
   /**
    * Dispatches an OTP to user target (Email or SMS).
    * In browser context: calls server endpoint POST /api/auth/otp/send.
@@ -152,6 +163,9 @@ class SmartQuantOtpEngine implements OtpProvider {
           });
 
           const data = (await res.json()) as OtpDeliveryResponse;
+          if (data.testOtp) {
+            this.setClientTestToken(target, data.testOtp);
+          }
           return {
             success: data.success,
             destinationMasked:
@@ -168,6 +182,7 @@ class SmartQuantOtpEngine implements OtpProvider {
             providerName: data.providerName,
             state: data.state,
             isDemo: data.isDemo ?? isDemo,
+            testOtp: data.testOtp,
           };
         } catch {
           // Fallback to in-process engine
@@ -182,6 +197,9 @@ class SmartQuantOtpEngine implements OtpProvider {
       purpose,
       isDemo,
     });
+    if (result.testOtp) {
+      this.setClientTestToken(target, result.testOtp);
+    }
 
     return {
       success: result.success,
@@ -193,6 +211,7 @@ class SmartQuantOtpEngine implements OtpProvider {
       providerName: result.providerName,
       state: result.state,
       isDemo: result.isDemo,
+      testOtp: result.testOtp,
     };
   }
 
@@ -294,11 +313,20 @@ class SmartQuantOtpEngine implements OtpProvider {
    * Returns undefined for any real user.
    */
   public _getTestToken(target: string): string | undefined {
+    const norm = target.trim().toLowerCase();
+    const digits = target.replace(/[^0-9]/g, "");
+    if (this.clientTestTokens.has(norm)) {
+      return this.clientTestTokens.get(norm);
+    }
+    if (digits && this.clientTestTokens.has(digits)) {
+      return this.clientTestTokens.get(digits);
+    }
     return serverOtpEngine.getDemoToken(target);
   }
 
   /** Reset internal cache (used in test teardown) */
   public _resetForTesting(): void {
+    this.clientTestTokens.clear();
     serverOtpEngine._resetForTesting();
   }
 

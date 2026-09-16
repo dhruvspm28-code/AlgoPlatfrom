@@ -56,6 +56,24 @@ function ForgotPassword() {
     return () => clearInterval(timer);
   }, [step, resendSeconds]);
 
+  // Auto-populate test/demo OTP in development and demo mode
+  useEffect(() => {
+    if (step === "VERIFY_AND_SET" && !otp) {
+      const immediateOtp = otpDetails?.testOtp || authService.getTestOtp(identifier);
+      if (immediateOtp) {
+        setOtp(immediateOtp);
+        toast.success("Demo OTP auto-filled");
+      } else {
+        authService.fetchTestOtpAsync(identifier).then((fetched) => {
+          if (fetched) {
+            setOtp(fetched);
+            toast.success("Demo OTP auto-filled");
+          }
+        });
+      }
+    }
+  }, [step, identifier, otpDetails, otp]);
+
   // Step 1: Request Password Reset OTP
   async function handleRequestOtp(e: React.FormEvent) {
     e.preventDefault();
@@ -78,6 +96,10 @@ function ForgotPassword() {
 
     if (res.otpDetails) {
       setOtpDetails(res.otpDetails);
+      if (res.otpDetails.testOtp) {
+        setOtp(res.otpDetails.testOtp);
+        toast.success("Demo OTP auto-filled");
+      }
     }
     setResendSeconds(45);
     setInfoMessage(res.message);
@@ -93,7 +115,13 @@ function ForgotPassword() {
     setLoading(false);
 
     if (res.success) {
-      if (res.otpDetails) setOtpDetails(res.otpDetails);
+      if (res.otpDetails) {
+        setOtpDetails(res.otpDetails);
+        if (res.otpDetails.testOtp) {
+          setOtp(res.otpDetails.testOtp);
+          toast.success("Demo OTP auto-filled");
+        }
+      }
       setResendSeconds(45);
       toast.info(
         `New verification code sent to ${res.otpDetails?.destinationMasked || "your registered contact"}`,
@@ -249,13 +277,16 @@ function ForgotPassword() {
                   type="button"
                   variant="outline"
                   size="sm"
-                  onClick={() => {
-                    const testOtp = authService.getTestOtp(identifier);
+                  onClick={async () => {
+                    let testOtp = otpDetails?.testOtp || authService.getTestOtp(identifier);
+                    if (!testOtp) {
+                      testOtp = await authService.fetchTestOtpAsync(identifier);
+                    }
                     if (testOtp) {
                       setOtp(testOtp);
                       toast.success(`Populated demo OTP`);
                     } else {
-                      toast.info("Check server console for OTP dispatch.");
+                      toast.info("Test OTP not available for this account.");
                     }
                   }}
                   className="text-xs h-7 border-amber-500/30 hover:bg-amber-500/20 text-amber-300 font-semibold cursor-pointer"

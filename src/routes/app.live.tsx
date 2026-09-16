@@ -8,7 +8,7 @@
  */
 
 import { createFileRoute } from "@tanstack/react-router";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
   Activity,
   ArrowUpRight,
@@ -54,10 +54,13 @@ import { PositionSizer } from "@/services/position-sizer";
 import { signalEngine, type StrategySignal } from "@/services/signal-engine";
 import { marketRegimeEngine } from "@/services/market-regime";
 import { marketDataEngine } from "@/services/market-data-engine";
-import { AreaSeries } from "@/components/charts/Charts";
-import { type Timeframe } from "@/services/market-data-types";
+import { type Timeframe, type NormalizedTick, type Candle } from "@/services/market-data-types";
+import { realtimeBus } from "@/services/realtime-bus";
 import { WatchlistTable } from "@/components/trading/WatchlistTable";
+import { TradingChart } from "@/components/trading/TradingChart";
+import { PositionsTable } from "@/components/trading/PositionsTable";
 import { InstrumentDrawer } from "@/components/trading/InstrumentDrawer";
+import { MarketDataDiagnostics } from "@/components/trading/MarketDataDiagnostics";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/app/live")({
@@ -90,6 +93,7 @@ export function LiveTerminalPage() {
   const [selectedSymbol, setSelectedSymbol] = useState<string>("RELIANCE");
   const [timeframe, setTimeframe] = useState<Timeframe>("15m");
   const [drawerSymbol, setDrawerSymbol] = useState<string | null>(null);
+  const [activeBottomTab, setActiveBottomTab] = useState<"POSITIONS" | "ORDERS">("POSITIONS");
 
   // Broker-Style Order Ticket State
   const [side, setSide] = useState<"BUY" | "SELL">("BUY");
@@ -100,6 +104,25 @@ export function LiveTerminalPage() {
   const [stopLoss, setStopLoss] = useState<number>(2900.0);
   const [target, setTarget] = useState<number>(3150.0);
   const [submitting, setSubmitting] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
+
+  const handleReconnectFeed = async () => {
+    setReconnecting(true);
+    try {
+      const res = await fetch("/api/market-data/reconnect", { method: "POST" });
+      const data = await res.json();
+      if (data.success) {
+        toast.success("Feed reconnected successfully!");
+      } else {
+        toast.error(data.message || "Feed reconnection failed.");
+      }
+      await marketDataEngine.reconnect();
+    } catch {
+      toast.error("Failed to connect to market data gateway.");
+    } finally {
+      setReconnecting(false);
+    }
+  };
 
   // Stepper Modal State
   const [selectedOrderForStepper, setSelectedOrderForStepper] = useState<DetailedOrder | null>(
@@ -115,17 +138,69 @@ export function LiveTerminalPage() {
     supertrend: true,
   });
 
-  // Active Instrument Data
+  // Active Instrument Data with Real-time Tick Subscription
   const selectedMapping = instrumentMapper.getMapping(selectedSymbol) || watchlist[0];
-  const latestTick = marketDataEngine.getLatestTick(selectedSymbol);
-  const currentLtp = latestTick ? latestTick.price : selectedMapping.basePrice;
-  const currentChange = latestTick ? latestTick.change : 0;
-  const currentChangePct = latestTick ? latestTick.changePct : 0;
+  const [liveTick, setLiveTick] = useState<NormalizedTick | undefined>(() =>
+    marketDataEngine.getLatestTick(selectedSymbol),
+  );
+  const [ticksReceivedCount, setTicksReceivedCount] = useState<number>(0);
+  const [frontendEventsReceived, setFrontendEventsReceived] = useState<number>(0);
+  const [lastTickReceivedAt, setLastTickReceivedAt] = useState<number>(0);
+  const [historicalCandles, setHistoricalCandles] = useState<Candle[]>([]);
 
-  // Candles & Indicators
-  const candles = candleAggregator.getCandles(selectedSymbol, timeframe);
-  const indicators = IndicatorEngine.calculateAll(candles);
-  const regime = marketRegimeEngine.getRegime();
+  // Fetch official session candles on symbol or timeframe change to populate candleAggregator
+  useEffect(() => {
+    let cancelled = false;
+    const fetchSessionCandles = async () => {
+      try {
+        const res = await fetch(
+          `/api/market-data/historical?symbol=${encodeURIComponent(selectedSymbol)}&range=1D&resolution=${timeframe}`,
+        );
+        const data = await res.json();
+        if (!cancelled && data.success && Array.isArray(data.candles) && data.candles.length > 0) {
+          setHistoricalCandles(data.candles);
+          candleAggregator.setCandles(selectedSymbol, timeframe, data.candles);
+        }
+      } catch (err) {
+        console.warn("[app.live] Session candles fetch error:", err);
+      }
+    };
+    fetchSessionCandles();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSymbol, timeframe]);
+
+  // Subscribe to real-time market ticks across all instruments
+  useEffect(() => {
+    // Initial sync
+    const initial = marketDataEngine.getLatestTick(selectedSymbol);
+    if (initial) setLiveTick(initial);
+
+    const unsub = realtimeBus.subscribe("MARKET_TICK", (evt) => {
+      const tick = evt.payload as NormalizedTick;
+      setFrontendEventsReceived((c) => c + 1);
+      setLastTickReceivedAt(Date.now());
+      if (tick && tick.symbol === selectedSymbol) {
+        setLiveTick(tick);
+      }
+      setTicksReceivedCount((c) => c + 1);
+    });
+
+    return () => unsub();
+  }, [selectedSymbol]);
+
+  const currentLtp = liveTick ? liveTick.price : selectedMapping.basePrice;
+  const currentChange = liveTick ? liveTick.change : 0;
+  const currentChangePct = liveTick ? liveTick.changePct : 0;
+
+  // Candles & Indicators dynamically recomputed on real ticks and historical loads
+  const candles = useMemo(
+    () => candleAggregator.getCandles(selectedSymbol, timeframe),
+    [selectedSymbol, timeframe, ticksReceivedCount, historicalCandles.length],
+  );
+  const indicators = useMemo(() => IndicatorEngine.calculateAll(candles), [candles]);
+  const regime = useMemo(() => marketRegimeEngine.getRegime(), [ticksReceivedCount]);
 
   // Active Signal for Selected Symbol
   const [activeSignal, setActiveSignal] = useState<StrategySignal | undefined>(() =>
@@ -170,6 +245,7 @@ export function LiveTerminalPage() {
   const handleSelectSymbol = (sym: string) => {
     setSelectedSymbol(sym);
     const tick = marketDataEngine.getLatestTick(sym);
+    setLiveTick(tick);
     const base = instrumentMapper.getMapping(sym)?.basePrice || 1000;
     const ltp = tick ? tick.price : base;
     setPrice(ltp);
@@ -219,6 +295,7 @@ export function LiveTerminalPage() {
         toast.success(
           `Simulated Paper Fill executed: ${side} ${qty} ${selectedSymbol} @ ₹${newOrder.avgFillPrice}`,
         );
+        setActiveBottomTab("POSITIONS");
         setSelectedOrderForStepper(newOrder);
       }
     } catch (err: unknown) {
@@ -229,14 +306,43 @@ export function LiveTerminalPage() {
     }
   };
 
-  // Convert aggregated candles to chart points
-  const chartData = candles.slice(-40).map((c) => ({
-    time: new Date(c.openTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-    value: c.close,
-    open: c.open,
-    high: c.high,
-    low: c.low,
-  }));
+  // Convert aggregated candles to chart points sorted chronologically
+  const chartData = useMemo(() => {
+    return candles
+      .map((c) => ({
+        timestamp: c.openTime,
+        time: new Date(c.openTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        value: c.close,
+        close: c.close,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        volume: c.volume,
+      }))
+      .sort((a, b) => a.timestamp - b.timestamp);
+  }, [candles]);
+
+  // Root-cause runtime diagnostic print required by user
+  useEffect(() => {
+    const firstC = candles[0];
+    const lastC = candles[candles.length - 1];
+    const liveC = candleAggregator.getCandles(selectedSymbol, timeframe);
+    const diag = {
+      selectedSymbol,
+      selectedTimeframe: timeframe,
+      "chartData.length": chartData.length,
+      "historicalCandles.length": historicalCandles.length,
+      "liveCandles.length": liveC.length,
+      firstTimestamp: firstC ? new Date(firstC.openTime).toISOString() : "N/A",
+      lastTimestamp: lastC ? new Date(lastC.openTime).toISOString() : "N/A",
+      firstClose: firstC ? firstC.close : "N/A",
+      lastClose: lastC ? lastC.close : "N/A",
+    };
+    console.log("[app.live:chartData Runtime Diagnostic]", diag);
+    if (typeof window !== "undefined") {
+      (window as unknown as Record<string, unknown>).__SMARTQUANT_LIVE_CHART_DIAGNOSTICS__ = diag;
+    }
+  }, [selectedSymbol, timeframe, chartData.length, historicalCandles.length, candles]);
 
   return (
     <div className="space-y-6">
@@ -268,6 +374,16 @@ export function LiveTerminalPage() {
       <PageHeader
         title="Live Execution Terminal"
         subtitle={`Real-Time Market Data · Multi-Timeframe Candles · Algorithmic Risk Pipeline · Mode: ${tradingMode.replace("_", " ")}`}
+      />
+
+      {/* Real-time Developer Diagnostic Panel */}
+      <MarketDataDiagnostics
+        feedStatus={feedStatus}
+        lastTickSymbol={liveTick?.symbol}
+        lastTickLtp={liveTick?.price}
+        lastTickTimestamp={liveTick?.timestamp}
+        frontendEventsReceived={frontendEventsReceived}
+        lastReceivedAt={lastTickReceivedAt}
       />
 
       {/* Live Market Feed Status & Provider Switcher Banner */}
@@ -342,6 +458,19 @@ export function LiveTerminalPage() {
                   />
                   {feedStatus.connectionState.replace("_", " ")}
                 </span>
+
+                {(feedStatus.connectionState === "AUTH_ERROR" ||
+                  feedStatus.connectionState === "DISCONNECTED" ||
+                  feedStatus.connectionState === "CONFIG_ERROR") && (
+                  <button
+                    type="button"
+                    onClick={handleReconnectFeed}
+                    disabled={reconnecting}
+                    className="inline-flex items-center gap-1 text-[10px] font-bold text-red-400 hover:text-red-300 underline underline-offset-2 ml-1 cursor-pointer"
+                  >
+                    {reconnecting ? "Reconnecting..." : "[Reconnect]"}
+                  </button>
+                )}
               </div>
               <p className="text-[11px] text-muted-foreground mt-0.5">
                 {feedStatus.provenanceText}
@@ -388,6 +517,49 @@ export function LiveTerminalPage() {
         </div>
       </div>
 
+      {/* Groww Session Approval / Auth Error Dedicated Action Card */}
+      {feedStatus.provider === "groww" && feedStatus.connectionState === "AUTH_ERROR" && (
+        <div className="rounded-xl border border-red-500/30 bg-red-950/20 p-4 backdrop-blur-md shadow-sm">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-red-500/10 border border-red-500/30 text-red-400">
+                <ShieldAlert className="h-5 w-5" />
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-bold text-foreground">Groww Authentication Required</h3>
+                  <span className="rounded-full bg-red-500/15 text-red-400 border border-red-500/30 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wide">
+                    AUTH ERROR
+                  </span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Groww requires session approval before an API access token can be generated.
+                </p>
+                <div className="mt-2 text-[11px] text-muted-foreground space-y-1">
+                  <p className="font-medium text-foreground/90">Follow these steps to activate live market data:</p>
+                  <ol className="list-decimal list-inside space-y-0.5 ml-1">
+                    <li>Log in to your Groww Developer Account</li>
+                    <li>Navigate to API Management / Sessions</li>
+                    <li>Approve your active trading session via TOTP / 2FA</li>
+                    <li>Click <strong>Reconnect</strong> below to establish live market data</li>
+                  </ol>
+                </div>
+              </div>
+            </div>
+            <Button
+              type="button"
+              onClick={handleReconnectFeed}
+              disabled={reconnecting}
+              variant="outline"
+              className="shrink-0 border-red-500/40 hover:bg-red-500/20 text-red-300 font-bold text-xs cursor-pointer"
+            >
+              <Radio className={cn("mr-1.5 h-3.5 w-3.5", reconnecting && "animate-spin")} />
+              {reconnecting ? "Reconnecting..." : "Reconnect"}
+            </Button>
+          </div>
+        </div>
+      )}
+
       {/* 3-COLUMN TERMINAL LAYOUT */}
       <div className="grid gap-5 lg:grid-cols-12 items-start">
         {/* LEFT COLUMN: MULTI-GROUP WATCHLIST (3 Cols) */}
@@ -400,177 +572,16 @@ export function LiveTerminalPage() {
           />
         </div>
 
-        {/* CENTER COLUMN: CHART & REALTIME INDICATORS (6 Cols - Flagship Visual Focus) */}
-        <GlassCard className="p-4 lg:col-span-6 space-y-4">
-          {/* Header with symbol details & Controls */}
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 pb-3">
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-lg font-bold text-foreground">{selectedMapping.symbol}</h2>
-                <span className="text-[10px] rounded px-1.5 py-0.5 bg-surface-3 text-muted-foreground font-semibold">
-                  {selectedMapping.name}
-                </span>
-              </div>
-              <div className="flex items-center gap-3 mt-1 text-xs num">
-                <span className="text-base font-extrabold text-foreground">
-                  ₹{currentLtp.toLocaleString("en-IN")}
-                </span>
-                <span
-                  className={`font-semibold ${currentChangePct >= 0 ? "text-bull" : "text-bear"}`}
-                >
-                  {currentChange >= 0 ? "+" : ""}
-                  {currentChange} ({currentChangePct >= 0 ? "+" : ""}
-                  {currentChangePct}%)
-                </span>
-              </div>
-            </div>
-
-            {/* Timeframe & Indicator Toggles matching Section 35 */}
-            <div className="flex flex-wrap items-center gap-2">
-              {/* Toggleable Indicators */}
-              <div className="flex items-center gap-1 bg-surface-2 p-1 rounded-xl text-[10px] font-semibold">
-                <button
-                  type="button"
-                  onClick={() => setActiveIndicators((p) => ({ ...p, ema: !p.ema }))}
-                  className={`px-1.5 py-0.5 rounded transition-colors ${
-                    activeIndicators.ema
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  EMA
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveIndicators((p) => ({ ...p, sma: !p.sma }))}
-                  className={`px-1.5 py-0.5 rounded transition-colors ${
-                    activeIndicators.sma
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  SMA
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveIndicators((p) => ({ ...p, vwap: !p.vwap }))}
-                  className={`px-1.5 py-0.5 rounded transition-colors ${
-                    activeIndicators.vwap
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  VWAP
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveIndicators((p) => ({ ...p, bb: !p.bb }))}
-                  className={`px-1.5 py-0.5 rounded transition-colors ${
-                    activeIndicators.bb
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  BB
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveIndicators((p) => ({ ...p, supertrend: !p.supertrend }))}
-                  className={`px-1.5 py-0.5 rounded transition-colors ${
-                    activeIndicators.supertrend
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  Supertrend
-                </button>
-              </div>
-
-              {/* Timeframe Toggles */}
-              <div className="flex items-center gap-1 bg-surface-2 p-1 rounded-xl">
-                {(["1m", "5m", "15m", "30m", "1h", "1D"] as const).map((tf) => (
-                  <button
-                    key={tf}
-                    onClick={() => setTimeframe(tf)}
-                    className={`px-2 py-1 text-[11px] font-semibold rounded-lg transition-all ${
-                      timeframe === tf
-                        ? "bg-primary text-primary-foreground shadow"
-                        : "text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    {tf}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          {/* Chart View */}
-          <div className="h-64 w-full">
-            <AreaSeries
-              data={chartData.map((d) => ({ date: d.time, value: d.value }))}
-              dataKey="value"
-              height={250}
-            />
-          </div>
-
-          {/* Live Indicator Snapshot Bar */}
-          <div className="flex flex-wrap gap-2 border-t border-border/60 pt-3 text-center num">
-            {activeIndicators.ema && (
-              <div className="flex-1 min-w-[70px] rounded-lg bg-surface-2/60 p-2 text-xs">
-                <p className="text-[10px] text-muted-foreground">EMA (9/21)</p>
-                <p className="font-bold text-foreground text-xs">
-                  {indicators.ema9.value} / {indicators.ema21.value}
-                </p>
-              </div>
-            )}
-            {activeIndicators.sma && (
-              <div className="flex-1 min-w-[70px] rounded-lg bg-surface-2/60 p-2 text-xs">
-                <p className="text-[10px] text-muted-foreground">SMA (20)</p>
-                <p className="font-bold text-foreground text-xs">{indicators.sma20.value}</p>
-              </div>
-            )}
-            <div className="flex-1 min-w-[70px] rounded-lg bg-surface-2/60 p-2 text-xs">
-              <p className="text-[10px] text-muted-foreground">RSI (14)</p>
-              <p
-                className={`font-bold text-xs ${
-                  indicators.rsi14.value > 70
-                    ? "text-bear"
-                    : indicators.rsi14.value < 30
-                      ? "text-bull"
-                      : "text-foreground"
-                }`}
-              >
-                {indicators.rsi14.value}
-              </p>
-            </div>
-            {activeIndicators.supertrend && (
-              <div className="flex-1 min-w-[70px] rounded-lg bg-surface-2/60 p-2 text-xs">
-                <p className="text-[10px] text-muted-foreground">Supertrend</p>
-                <p
-                  className={`font-bold text-xs ${
-                    indicators.supertrend.value.trend === "BULLISH" ? "text-bull" : "text-bear"
-                  }`}
-                >
-                  {indicators.supertrend.value.trend}
-                </p>
-              </div>
-            )}
-            {activeIndicators.vwap && (
-              <div className="flex-1 min-w-[70px] rounded-lg bg-surface-2/60 p-2 text-xs">
-                <p className="text-[10px] text-muted-foreground">VWAP</p>
-                <p className="font-bold text-foreground text-xs">₹{indicators.vwap.value}</p>
-              </div>
-            )}
-            {activeIndicators.bb && (
-              <div className="flex-1 min-w-[70px] rounded-lg bg-surface-2/60 p-2 text-xs">
-                <p className="text-[10px] text-muted-foreground">Bollinger Bands</p>
-                <p className="font-bold text-foreground text-xs">
-                  {indicators.bollinger.value.lower} - {indicators.bollinger.value.upper}
-                </p>
-              </div>
-            )}
-          </div>
+        {/* CENTER COLUMN: PRO CANDLESTICK & VOLUME CHART (6 Cols) */}
+        <div className="lg:col-span-6 space-y-3">
+          <TradingChart
+            symbol={selectedSymbol}
+            exchange={selectedMapping.exchange as "NSE" | "BSE"}
+            feedStatus={feedStatus}
+            currentTick={liveTick}
+            timeframe={timeframe}
+            onTimeframeChange={setTimeframe}
+          />
 
           {/* Explain This Trade Action Banner */}
           <div className="rounded-xl border border-primary/30 bg-primary/10 p-3 flex items-center justify-between gap-3">
@@ -587,12 +598,12 @@ export function LiveTerminalPage() {
               size="sm"
               variant="default"
               onClick={() => openExplainModal("ORD-1024")}
-              className="text-xs h-7 px-3 font-semibold"
+              className="text-xs h-7 px-3 font-semibold cursor-pointer"
             >
               Explain Trade
             </Button>
           </div>
-        </GlassCard>
+        </div>
 
         {/* RIGHT COLUMN: REGIME, SIGNAL, SIZING & ORDER TICKET (3 Cols) */}
         <GlassCard className="p-4 lg:col-span-3 space-y-4">
@@ -915,92 +926,125 @@ export function LiveTerminalPage() {
         onClose={() => setDrawerSymbol(null)}
       />
 
-      {/* BOTTOM SECTION: ORDERS & LIFECYCLE MONITOR */}
-      <GlassCard className="p-5 space-y-4">
-        <div className="flex items-center justify-between border-b border-border/60 pb-3">
-          <div>
-            <h2 className="font-semibold text-sm flex items-center gap-2">
-              <Activity className="h-4 w-4 text-primary" /> Active Orders & Real-Time Lifecycle
-              Stepper
-            </h2>
-            <p className="text-xs text-muted-foreground">
-              Click any order to inspect execution stepper or Explain This Trade audit chain
-            </p>
+      {/* BOTTOM SECTION: WORKSTATION DOCK (POSITIONS & ORDERS) */}
+      <GlassCard className="p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between border-b border-border/60 pb-2.5 gap-2">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setActiveBottomTab("POSITIONS")}
+              className={cn(
+                "px-3 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1.5",
+                activeBottomTab === "POSITIONS"
+                  ? "bg-primary text-primary-foreground shadow"
+                  : "text-muted-foreground hover:text-foreground bg-surface-2",
+              )}
+            >
+              <TrendingUp className="h-3.5 w-3.5" /> Open Positions & Live P&L
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveBottomTab("ORDERS")}
+              className={cn(
+                "px-3 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1.5",
+                activeBottomTab === "ORDERS"
+                  ? "bg-primary text-primary-foreground shadow"
+                  : "text-muted-foreground hover:text-foreground bg-surface-2",
+              )}
+            >
+              <Activity className="h-3.5 w-3.5" /> Order Book ({orders.length})
+            </button>
           </div>
-          <span className="text-xs text-muted-foreground">{orders.length} recorded orders</span>
+          <span className="text-xs text-muted-foreground font-mono">
+            {activeBottomTab === "POSITIONS"
+              ? "Live Mark-to-Market P&L Engine"
+              : "Real-time Order Execution Lifecycle"}
+          </span>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="text-left text-muted-foreground border-b border-border/60 uppercase tracking-wide">
-                <th className="pb-2">Order ID</th>
-                <th className="pb-2">Symbol</th>
-                <th className="pb-2">Side</th>
-                <th className="pb-2">Qty</th>
-                <th className="pb-2">Price</th>
-                <th className="pb-2">Status</th>
-                <th className="pb-2 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border/40 num">
-              {orders.map((ord) => (
-                <tr
-                  key={ord.id}
-                  className="hover:bg-surface-2/60 cursor-pointer transition-colors"
-                  onClick={() => setSelectedOrderForStepper(ord)}
-                >
-                  <td className="py-3 font-semibold text-primary">{ord.id}</td>
-                  <td className="py-3 font-medium text-foreground">{ord.symbol}</td>
-                  <td className="py-3">
-                    <StatusPill status={ord.side} />
-                  </td>
-                  <td className="py-3">
-                    {ord.filledQty} / {ord.qty}
-                  </td>
-                  <td className="py-3">₹{ord.price}</td>
-                  <td className="py-3">
-                    <span
-                      className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 font-bold ${
-                        ord.status === "EXECUTED"
-                          ? "bg-bull/10 text-bull"
-                          : ord.status === "REJECTED"
-                            ? "bg-bear/10 text-bear"
-                            : "bg-info/10 text-info"
-                      }`}
-                    >
-                      {ord.status}
-                    </span>
-                  </td>
-                  <td className="py-3 text-right space-x-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openExplainModal(ord.id);
-                      }}
-                      className="h-7 px-2 text-[11px] font-semibold text-primary border-primary/30"
-                    >
-                      Explain Trade
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSelectedOrderForStepper(ord);
-                      }}
-                      className="h-7 px-2 text-[11px]"
-                    >
-                      Stepper <ChevronRight className="ml-1 h-3 w-3" />
-                    </Button>
-                  </td>
+        {activeBottomTab === "POSITIONS" ? (
+          <PositionsTable onSelectSymbol={handleSelectSymbol} />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-muted-foreground border-b border-border/60 uppercase tracking-wide">
+                  <th className="pb-2">Order ID</th>
+                  <th className="pb-2">Symbol</th>
+                  <th className="pb-2">Side</th>
+                  <th className="pb-2">Qty</th>
+                  <th className="pb-2">Price</th>
+                  <th className="pb-2">Status</th>
+                  <th className="pb-2 text-right">Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody className="divide-y divide-border/40 num">
+                {orders.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="py-6 text-center text-muted-foreground">
+                      No orders recorded. Use the order ticket above to place an order.
+                    </td>
+                  </tr>
+                ) : (
+                  orders.map((ord) => (
+                    <tr
+                      key={ord.id}
+                      className="hover:bg-surface-2/60 cursor-pointer transition-colors"
+                      onClick={() => setSelectedOrderForStepper(ord)}
+                    >
+                      <td className="py-3 font-semibold text-primary">{ord.id}</td>
+                      <td className="py-3 font-medium text-foreground">{ord.symbol}</td>
+                      <td className="py-3">
+                        <StatusPill status={ord.side} />
+                      </td>
+                      <td className="py-3">
+                        {ord.filledQty} / {ord.qty}
+                      </td>
+                      <td className="py-3 font-mono">₹{ord.price}</td>
+                      <td className="py-3">
+                        <span
+                          className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 font-bold ${
+                            ord.status === "EXECUTED"
+                              ? "bg-bull/10 text-bull"
+                              : ord.status === "REJECTED"
+                                ? "bg-bear/10 text-bear"
+                                : "bg-info/10 text-info"
+                          }`}
+                        >
+                          {ord.status}
+                        </span>
+                      </td>
+                      <td className="py-3 text-right space-x-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openExplainModal(ord.id);
+                          }}
+                          className="h-7 px-2 text-[11px] font-semibold text-primary border-primary/30"
+                        >
+                          Explain Trade
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedOrderForStepper(ord);
+                          }}
+                          className="h-7 px-2 text-[11px]"
+                        >
+                          Stepper <ChevronRight className="ml-1 h-3 w-3" />
+                        </Button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
       </GlassCard>
 
       {/* ORDER LIFECYCLE STEPPER DIALOG */}
