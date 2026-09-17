@@ -4,7 +4,10 @@
  */
 
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
+import { realtimeBus } from "@/services/realtime-bus";
+import { marketDataEngine } from "@/services/market-data-engine";
+import { type NormalizedTick } from "@/services/market-data-types";
 import {
   Radar,
   Search,
@@ -66,6 +69,53 @@ function WatchlistPage() {
   const [search, setSearch] = useState("");
   const [isDemoMode, setIsDemoMode] = useState(true);
 
+  // Subscribe to live market ticks and update watchlist instruments
+  useEffect(() => {
+    // Initial sync with latest ticks in marketDataEngine
+    setInstruments((prev) =>
+      prev.map((inst) => {
+        const tick = marketDataEngine.getLatestTick(inst.symbol);
+        if (!tick) return inst;
+        const prevClose = tick.previousClose || tick.prevClose || inst.prevClose || inst.ltp;
+        const change = tick.change ?? Number((tick.price - prevClose).toFixed(2));
+        const changePct = tick.changePct ?? (prevClose > 0 ? Number((((tick.price - prevClose) / prevClose) * 100).toFixed(2)) : 0);
+        return {
+          ...inst,
+          ltp: tick.price,
+          change,
+          changePct,
+          high: tick.high ? Math.max(inst.high, tick.high) : inst.high,
+          low: tick.low ? Math.min(inst.low, tick.low) : inst.low,
+          prevClose,
+        };
+      }),
+    );
+
+    const unsub = realtimeBus.subscribe("MARKET_TICK", (evt) => {
+      const tick = evt.payload as NormalizedTick;
+      if (!tick || !tick.symbol) return;
+      setInstruments((prev) =>
+        prev.map((inst) => {
+          if (inst.symbol !== tick.symbol) return inst;
+          const prevClose = tick.previousClose || tick.prevClose || inst.prevClose || inst.ltp;
+          const change = tick.change ?? Number((tick.price - prevClose).toFixed(2));
+          const changePct = tick.changePct ?? (prevClose > 0 ? Number((((tick.price - prevClose) / prevClose) * 100).toFixed(2)) : 0);
+          return {
+            ...inst,
+            ltp: tick.price,
+            change,
+            changePct,
+            high: tick.high ? Math.max(inst.high, tick.high) : inst.high,
+            low: tick.low ? Math.min(inst.low, tick.low) : inst.low,
+            prevClose,
+          };
+        }),
+      );
+    });
+
+    return () => unsub();
+  }, []);
+
   // Instrument Detail Drawer / Modal
   const [selectedInstrument, setSelectedInstrument] = useState<WatchlistInstrument | null>(null);
 
@@ -111,12 +161,18 @@ function WatchlistPage() {
     if (!selectedInstrument) return;
     setIsSubmittingOrder(true);
     try {
+      const slPrice =
+        orderSide === "BUY"
+          ? Number((selectedInstrument.ltp * 0.97).toFixed(2))
+          : Number((selectedInstrument.ltp * 1.03).toFixed(2));
+
       await submitOrder({
         symbol: selectedInstrument.symbol,
         side: orderSide,
         orderType: "MARKET",
         qty: orderQty,
         price: selectedInstrument.ltp,
+        stopLossPrice: slPrice,
         strategyId: "Manual Ticket",
       });
       toast.success(

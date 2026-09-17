@@ -108,23 +108,26 @@ class RiskEngine {
     price: number;
     stopLossPrice?: number;
     strategyId?: string;
+    isPaper?: boolean;
   }): RiskCheckResult {
     const tradeValue = order.qty * order.price;
 
-    // 0. Market Data Freshness Check
-    const feedStatus = marketDataEngine.getFeedStatus();
-    if (
-      feedStatus.isStale ||
-      feedStatus.connectionState === "CONFIG_ERROR" ||
-      feedStatus.connectionState === "AUTH_ERROR" ||
-      feedStatus.connectionState === "DISCONNECTED"
-    ) {
-      return this.reject(
-        "Stale/Unavailable Market Data",
-        `Market data feed status is '${feedStatus.connectionState}'. Order placement blocked for safety.`,
-        "REJECT",
-        order,
-      );
+    // 0. Market Data Freshness Check (enforced for real broker orders; paper orders can execute against last known price)
+    if (!order.isPaper) {
+      const feedStatus = marketDataEngine.getFeedStatus();
+      if (
+        feedStatus.isStale ||
+        feedStatus.connectionState === "CONFIG_ERROR" ||
+        feedStatus.connectionState === "AUTH_ERROR" ||
+        feedStatus.connectionState === "DISCONNECTED"
+      ) {
+        return this.reject(
+          "Stale/Unavailable Market Data",
+          `Market data feed status is '${feedStatus.connectionState}'. Order placement blocked for safety.`,
+          "REJECT",
+          order,
+        );
+      }
     }
 
     if (this.riskEngineStatus === "BREACHED") {

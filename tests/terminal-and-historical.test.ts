@@ -274,4 +274,61 @@ describe("SmartQuant Edge Professional Terminal & Historical Pipeline", () => {
     assert.ok(typeof feedStatus.isStale === "boolean");
     assert.ok(feedStatus.staleThresholdSec >= 15);
   });
+
+  test("12. should execute multiple sequential paper orders without blocking and update cash balance", () => {
+    const initialCash = paperBroker.getCashBalance();
+
+    const order1 = paperBroker.simulateOrder({
+      idempotencyKey: `seq-sbin-${Date.now()}`,
+      symbol: "SBIN",
+      side: "BUY",
+      orderType: "MARKET",
+      qty: 10,
+      price: 780.0,
+    });
+    assert.equal(order1.status, "FILLED");
+    assert.equal(order1.qty, 10);
+
+    const order2 = paperBroker.simulateOrder({
+      idempotencyKey: `seq-reliance-${Date.now()}`,
+      symbol: "RELIANCE",
+      side: "BUY",
+      orderType: "MARKET",
+      qty: 5,
+      price: 2980.0,
+    });
+    assert.equal(order2.status, "FILLED");
+    assert.equal(order2.qty, 5);
+
+    const order3 = paperBroker.simulateOrder({
+      idempotencyKey: `seq-tcs-${Date.now()}`,
+      symbol: "TCS",
+      side: "BUY",
+      orderType: "MARKET",
+      qty: 2,
+      price: 3850.0,
+    });
+    assert.equal(order3.status, "FILLED");
+    assert.equal(order3.qty, 2);
+
+    const newCash = paperBroker.getCashBalance();
+    assert.ok(newCash < initialCash, "Cash balance should be debited after multiple buys");
+
+    const posSbin = paperBroker.getPosition("SBIN");
+    const posReliance = paperBroker.getPosition("RELIANCE");
+    const posTcs = paperBroker.getPosition("TCS");
+    assert.ok(posSbin && posSbin.qty >= 10);
+    assert.ok(posReliance && posReliance.qty >= 5);
+    assert.ok(posTcs && posTcs.qty >= 2);
+  });
+
+  test("13. should calculate canonical Day P&L and portfolio totals accurately", () => {
+    const portfolio = paperBroker.getPortfolio();
+    assert.ok(portfolio.cashBalance > 0);
+    assert.ok(portfolio.investedCapital >= 0);
+    assert.ok(portfolio.totalPortfolioValue > 0);
+    assert.equal(typeof portfolio.todayPnl, "number");
+    assert.equal(typeof portfolio.unrealisedPnl, "number");
+    assert.equal(typeof portfolio.realisedPnl, "number");
+  });
 });

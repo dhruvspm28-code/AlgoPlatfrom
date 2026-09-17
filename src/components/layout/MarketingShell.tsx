@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { indices } from "@/data/market";
 import { marketDataEngine } from "@/services/market-data-engine";
+import { realtimeBus } from "@/services/realtime-bus";
 import { usePlatform } from "@/context/PlatformContext";
 
 /** Public navigation matching Section 2 */
@@ -22,6 +23,15 @@ const navItems = [
 ];
 
 function LiveTicker() {
+  const [, setTickVer] = useState(0);
+
+  useEffect(() => {
+    const unsub = realtimeBus.subscribe("MARKET_TICK", () => {
+      setTickVer((v) => v + 1);
+    });
+    return () => unsub();
+  }, []);
+
   const row = [...indices, ...indices];
   return (
     <div className="overflow-hidden border-b border-border bg-surface-2/40 py-1">

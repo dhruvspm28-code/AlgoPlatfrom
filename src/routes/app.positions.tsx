@@ -42,6 +42,7 @@ import {
 } from "@/data/central-trading-dataset";
 import { cn } from "@/lib/utils";
 import { paperBroker } from "@/services/paper-broker";
+import { instrumentMapper } from "@/services/instrument-mapper";
 
 export const Route = createFileRoute("/app/positions")({
   head: () => ({
@@ -59,14 +60,65 @@ export const Route = createFileRoute("/app/positions")({
 
 function PositionsPage() {
   const navigate = useNavigate();
-  const { openExplainModal, exitAllPositions } = usePlatform();
+  const { openExplainModal, exitAllPositions, paperPositions } = usePlatform();
 
-  // Positions dataset initialized from deterministic central repository
-  const [positions, setPositions] = useState<ConsistentPosition[]>(DEMO_POSITIONS);
+  // Custom guardrails overrides for stopLoss / target
+  const [customGuardrails, setCustomGuardrails] = useState<Record<string, { stopLoss: number; target: number }>>({});
   const [activeTab, setActiveTab] = useState<"ALL" | "INTRADAY" | "DELIVERY">("ALL");
   const [search, setSearch] = useState("");
   const [strategyFilter, setStrategyFilter] = useState<string>("ALL");
   const [sortBy, setSortBy] = useState<"pnl" | "currentValue" | "symbol">("pnl");
+
+  // Map canonical paper broker positions to table format
+  const positions: ConsistentPosition[] = useMemo(() => {
+    const totalVal = paperPositions.reduce(
+      (acc, p) => acc + (p.currentValue ?? p.qty * (p.currentPrice || p.avgPrice)),
+      0,
+    );
+    return paperPositions.map((p) => {
+      const mapping = instrumentMapper.getMapping(p.symbol);
+      const isLong = p.side === "LONG";
+      const invested = p.investedValue ?? Number((p.qty * p.avgPrice).toFixed(2));
+      const curVal = p.currentValue ?? Number((p.qty * (p.currentPrice || p.avgPrice)).toFixed(2));
+      const custom = customGuardrails[p.symbol];
+      const stopLoss = custom?.stopLoss ?? Number((p.avgPrice * (isLong ? 0.97 : 1.03)).toFixed(2));
+      const target = custom?.target ?? Number((p.avgPrice * (isLong ? 1.05 : 0.95)).toFixed(2));
+      const sector =
+        p.symbol.includes("BANK") || p.symbol === "SBIN" || p.symbol === "HDFCBANK" || p.symbol === "ICICIBANK"
+          ? ("Banking" as const)
+          : p.symbol === "TCS" || p.symbol === "INFY" || p.symbol === "WIPRO"
+            ? ("IT" as const)
+            : p.symbol === "TATAMOTORS" || p.symbol === "MARUTI"
+              ? ("Auto" as const)
+              : ("Energy" as const);
+
+      return {
+        symbol: p.symbol,
+        name: mapping?.name || `${p.symbol} Equity`,
+        exchange: "NSE" as const,
+        product: "INTRADAY" as const,
+        side: p.side,
+        qty: p.qty,
+        avgPrice: p.avgPrice,
+        currentPrice: p.currentPrice || p.avgPrice,
+        ltp: p.currentPrice || p.avgPrice,
+        invested,
+        currentValue: curVal,
+        pnl: p.pnl,
+        pnlPct: p.pnlPct,
+        dayPnl: p.dayPnl ?? 0,
+        dayPnlPct: p.dayPnlPct ?? 0,
+        stopLoss,
+        target,
+        portfolioWeight: totalVal > 0 ? Number(((curVal / totalVal) * 100).toFixed(1)) : 0,
+        entryTime: p.updatedAt || new Date().toISOString(),
+        strategy: "Strategy Signal Pro",
+        sector,
+        unrealizedPnl: p.pnl,
+        status: "OPEN" as const,
+      };
+    });
+  }, [paperPositions, customGuardrails]);
 
   // Position detail drawer state
   const [selectedPosition, setSelectedPosition] = useState<ConsistentPosition | null>(null);
@@ -117,26 +169,21 @@ function PositionsPage() {
     } catch {
       // ignore
     }
-    setPositions((prev) => prev.filter((p) => p.symbol !== symbol));
     if (selectedPosition?.symbol === symbol) setSelectedPosition(null);
     toast.warning(`Position squared off: ${symbol}`);
   };
 
   const handleSquareOffAll = () => {
     exitAllPositions();
-    setPositions([]);
-    toast.warning(`All ${positions.length} open positions liquidated`);
+    toast.warning(`All open positions liquidated`);
   };
 
   const handleSaveModification = () => {
     if (!editingPosition) return;
-    setPositions((prev) =>
-      prev.map((p) =>
-        p.symbol === editingPosition.symbol
-          ? { ...p, stopLoss: modStopLoss, target: modTarget }
-          : p,
-      ),
-    );
+    setCustomGuardrails((prev) => ({
+      ...prev,
+      [editingPosition.symbol]: { stopLoss: modStopLoss, target: modTarget },
+    }));
     setEditingPosition(null);
     toast.success(`Guardrails updated for ${editingPosition.symbol}`);
   };

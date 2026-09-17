@@ -6,8 +6,8 @@
 
 import { realtimeBus } from "./realtime-bus";
 import { auditLogService } from "./audit-log-service";
-import { strategies, type Strategy } from "@/data/platform";
-import { activeOrders, openPositions } from "@/data/market";
+import { strategies, type Strategy } from "../data/platform";
+import { activeOrders, openPositions } from "../data/market";
 
 export type GlobalTradingState = "ACTIVE" | "HALTED";
 

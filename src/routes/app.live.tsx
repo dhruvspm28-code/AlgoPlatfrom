@@ -265,7 +265,7 @@ export function LiveTerminalPage() {
       return;
     }
 
-    if (isFeedStale) {
+    if (tradingMode === "LIVE_TRADING" && isFeedStale) {
       toast.error(
         `Market data is ${feedStatus.connectionState}. Order placement blocked for risk protection.`,
       );
@@ -296,7 +296,6 @@ export function LiveTerminalPage() {
           `Simulated Paper Fill executed: ${side} ${qty} ${selectedSymbol} @ ₹${newOrder.avgFillPrice}`,
         );
         setActiveBottomTab("POSITIONS");
-        setSelectedOrderForStepper(newOrder);
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to submit order";
@@ -847,10 +846,16 @@ export function LiveTerminalPage() {
                     className={
                       !isFeedStale
                         ? "text-bull font-bold flex items-center gap-0.5"
-                        : "text-bear font-bold"
+                        : tradingMode === "PAPER_TRADING"
+                          ? "text-amber-500 font-bold"
+                          : "text-bear font-bold"
                     }
                   >
-                    {!isFeedStale ? "✓ VERIFIED" : "✗ STALE / OFFLINE"}
+                    {!isFeedStale
+                      ? "✓ VERIFIED"
+                      : tradingMode === "PAPER_TRADING"
+                        ? "⚠ PAPER ACTIVE"
+                        : "✗ STALE / OFFLINE"}
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
@@ -902,7 +907,7 @@ export function LiveTerminalPage() {
               disabled={
                 submitting ||
                 globalTradingState === "HALTED" ||
-                isFeedStale ||
+                (tradingMode === "LIVE_TRADING" && isFeedStale) ||
                 isMissingStopLoss ||
                 isOverCapital ||
                 isOverMaxTrade

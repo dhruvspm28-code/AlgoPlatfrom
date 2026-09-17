@@ -92,7 +92,7 @@ export function Dashboard() {
   const [liveTick, setLiveTick] = useState<NormalizedTick | undefined>(() =>
     marketDataEngine.getLatestTick("NIFTY 50"),
   );
-  const [, setTickCount] = useState(0);
+  const [tickCount, setTickCount] = useState(0);
 
   // Subscribe to real-time market ticks across all instruments
   useEffect(() => {
@@ -167,7 +167,7 @@ export function Dashboard() {
       topLosers: sortedByLoss.slice(0, 3),
       volumeLeaders: sortedByVol.slice(0, 3),
     };
-  }, [universe]);
+  }, [universe, tickCount]);
 
   // Sector performance summary
   const sectorSummary = [

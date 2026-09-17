@@ -4,6 +4,7 @@
  * and current positions for any selected symbol.
  */
 
+import { useState, useEffect } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   Activity,
@@ -65,9 +66,37 @@ export function InstrumentDrawer({ symbol, open, onClose }: InstrumentDrawerProp
   const changePct = tick ? tick.changePct : 0;
   const isUp = changePct >= 0;
 
-  // Real calculated indicators
-  const candles = candleAggregator.getCandles(symbol, "15m");
-  const indicators = IndicatorEngine.calculateAll(candles);
+  // Real calculated indicators & candles
+  const [drawerCandles, setDrawerCandles] = useState<any[]>(() =>
+    symbol ? candleAggregator.getCandles(symbol, "15m") : [],
+  );
+
+  useEffect(() => {
+    if (!open || !symbol) return;
+    let cancelled = false;
+    const fetchCandles = async () => {
+      try {
+        const res = await fetch(
+          `/api/market-data/historical?symbol=${encodeURIComponent(symbol)}&range=1D&resolution=15m`,
+        );
+        const data = await res.json();
+        if (!cancelled && data.success && Array.isArray(data.candles) && data.candles.length > 0) {
+          setDrawerCandles(data.candles);
+          candleAggregator.setCandles(symbol, "15m", data.candles);
+        }
+      } catch (err) {
+        console.warn("[InstrumentDrawer] Historical candle fetch failed:", err);
+      }
+    };
+    fetchCandles();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, symbol]);
+
+  const effectiveCandles =
+    drawerCandles.length > 0 ? drawerCandles : candleAggregator.getCandles(symbol, "15m");
+  const indicators = IndicatorEngine.calculateAll(effectiveCandles);
   const regime = marketRegimeEngine.getRegime();
   const signal = signalEngine.getLatestSignal(symbol);
 
@@ -75,7 +104,7 @@ export function InstrumentDrawer({ symbol, open, onClose }: InstrumentDrawerProp
   const position = paperBroker.getPosition(symbol);
 
   // Sparkline data from recent candles
-  const chartPoints = candles.slice(-30).map((c) => ({
+  const chartPoints = effectiveCandles.slice(-30).map((c) => ({
     time: new Date(c.openTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     value: c.close,
   }));

@@ -38,6 +38,7 @@ import {
 } from "@/data/central-trading-dataset";
 import { equityCurve } from "@/data/market";
 import { cn } from "@/lib/utils";
+import { instrumentMapper } from "@/services/instrument-mapper";
 
 export const Route = createFileRoute("/app/portfolio")({
   head: () => ({
@@ -55,10 +56,61 @@ export const Route = createFileRoute("/app/portfolio")({
 
 function PortfolioPage() {
   const navigate = useNavigate();
-  const { exitAllPositions } = usePlatform();
+  const { exitAllPositions, paperPortfolio, paperPositions } = usePlatform();
 
   const [timeframe, setTimeframe] = useState<"1D" | "1W" | "1M" | "3M" | "1Y" | "ALL">("1M");
-  const [positions, setPositions] = useState<ConsistentPosition[]>(DEMO_POSITIONS);
+
+  // Totals from canonical paperPortfolio
+  const totalVal = paperPortfolio.totalPortfolioValue;
+  const availCash = paperPortfolio.cashBalance;
+  const investedVal = paperPortfolio.investedCapital;
+  const todayPnl = paperPortfolio.todayPnl ?? 0;
+  const totalPnl = paperPortfolio.realisedPnl + paperPortfolio.unrealisedPnl;
+  const returnPct = investedVal > 0 ? Number(((totalPnl / investedVal) * 100).toFixed(2)) : 0;
+
+  // Map canonical paper broker positions
+  const positions: ConsistentPosition[] = useMemo(() => {
+    return paperPositions.map((p) => {
+      const mapping = instrumentMapper.getMapping(p.symbol);
+      const isLong = p.side === "LONG";
+      const invested = p.investedValue ?? Number((p.qty * p.avgPrice).toFixed(2));
+      const curVal = p.currentValue ?? Number((p.qty * (p.currentPrice || p.avgPrice)).toFixed(2));
+      const sector =
+        p.symbol.includes("BANK") || p.symbol === "SBIN" || p.symbol === "HDFCBANK" || p.symbol === "ICICIBANK"
+          ? ("Banking" as const)
+          : p.symbol === "TCS" || p.symbol === "INFY" || p.symbol === "WIPRO"
+            ? ("IT" as const)
+            : p.symbol === "TATAMOTORS" || p.symbol === "MARUTI"
+              ? ("Auto" as const)
+              : ("Energy" as const);
+
+      return {
+        symbol: p.symbol,
+        name: mapping?.name || `${p.symbol} Equity`,
+        exchange: "NSE" as const,
+        product: "INTRADAY" as const,
+        side: p.side,
+        qty: p.qty,
+        avgPrice: p.avgPrice,
+        currentPrice: p.currentPrice || p.avgPrice,
+        ltp: p.currentPrice || p.avgPrice,
+        invested,
+        currentValue: curVal,
+        pnl: p.pnl,
+        pnlPct: p.pnlPct,
+        dayPnl: p.dayPnl ?? 0,
+        dayPnlPct: p.dayPnlPct ?? 0,
+        stopLoss: Number((p.avgPrice * (isLong ? 0.97 : 1.03)).toFixed(2)),
+        target: Number((p.avgPrice * (isLong ? 1.05 : 0.95)).toFixed(2)),
+        portfolioWeight: totalVal > 0 ? Number(((curVal / totalVal) * 100).toFixed(1)) : 0,
+        entryTime: p.updatedAt || new Date().toISOString(),
+        strategy: "Strategy Signal Pro",
+        sector,
+        unrealizedPnl: p.pnl,
+        status: "OPEN" as const,
+      };
+    });
+  }, [paperPositions, totalVal]);
 
   // Dynamic equity curve based on selected timeframe
   const equityPoints = useMemo(() => {
@@ -70,16 +122,8 @@ function PortfolioPage() {
       "1Y": 60,
       ALL: 72,
     };
-    return equityCurve(pointsMap[timeframe], 1000000, 33);
-  }, [timeframe]);
-
-  // Totals
-  const totalVal = DEMO_PORTFOLIO_TOTALS.totalPortfolioValue;
-  const availCash = DEMO_PORTFOLIO_TOTALS.availableCash;
-  const investedVal = DEMO_PORTFOLIO_TOTALS.investedCapital;
-  const todayPnl = DEMO_PORTFOLIO_TOTALS.todayPnl;
-  const totalPnl = DEMO_PORTFOLIO_TOTALS.totalPnl;
-  const returnPct = DEMO_PORTFOLIO_TOTALS.returnPct;
+    return equityCurve(pointsMap[timeframe], paperPortfolio.totalPortfolioValue, 33);
+  }, [timeframe, paperPortfolio.totalPortfolioValue]);
 
   // Asset allocation pie data (Equity, Intraday F&O, Cash)
   const assetAllocationData = useMemo(() => {

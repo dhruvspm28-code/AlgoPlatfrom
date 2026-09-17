@@ -79,6 +79,9 @@ class PaperBroker {
   }
 
   private loadState() {
+    this.cashBalance = DatabasePersistence.getItem<number>("paper_cash_balance", 1000000);
+    this.realisedPnl = DatabasePersistence.getItem<number>("paper_realised_pnl", 24500);
+
     const savedPos = DatabasePersistence.getItem<PaperPosition[]>("paper_positions", [
       {
         symbol: "RELIANCE",
@@ -125,6 +128,29 @@ class PaperBroker {
   private saveState() {
     DatabasePersistence.setItem("paper_positions", Array.from(this.positions.values()));
     DatabasePersistence.setItem("paper_trades", this.trades);
+    DatabasePersistence.setItem("paper_cash_balance", this.cashBalance);
+    DatabasePersistence.setItem("paper_realised_pnl", this.realisedPnl);
+  }
+
+  public getCashBalance(): number {
+    return this.cashBalance;
+  }
+
+  public setCashBalance(val: number): void {
+    this.cashBalance = val;
+    this.saveState();
+    realtimeBus.emit("PORTFOLIO_UPDATED", this.getPortfolio());
+  }
+
+  public resetAccount(initialCapital = 1000000): void {
+    this.positions.clear();
+    this.trades = [];
+    this.processedKeys.clear();
+    this.cashBalance = initialCapital;
+    this.realisedPnl = 0;
+    this.saveState();
+    realtimeBus.emit("POSITION_UPDATED", []);
+    realtimeBus.emit("PORTFOLIO_UPDATED", this.getPortfolio());
   }
 
   /**
@@ -138,9 +164,14 @@ class PaperBroker {
 
       const pos = this.positions.get(tick.symbol)!;
       pos.currentPrice = tick.price;
-      const diff = pos.side === "LONG" ? tick.price - pos.avgPrice : pos.avgPrice - tick.price;
+      const prevClose = tick.previousClose || tick.prevClose || pos.avgPrice;
+      const isLong = pos.side === "LONG";
+      const diff = isLong ? tick.price - pos.avgPrice : pos.avgPrice - tick.price;
       pos.pnl = Number((pos.qty * diff).toFixed(2));
       pos.pnlPct = Number(((diff / pos.avgPrice) * 100).toFixed(2));
+      const dayDiff = isLong ? tick.price - prevClose : prevClose - tick.price;
+      pos.dayPnl = Number((pos.qty * dayDiff).toFixed(2));
+      pos.dayPnlPct = prevClose > 0 ? Number(((dayDiff / prevClose) * 100).toFixed(2)) : 0;
       pos.updatedAt = new Date().toISOString();
 
       realtimeBus.emit("POSITION_UPDATED", this.getPositions());
@@ -238,7 +269,20 @@ class PaperBroker {
 
     // 2. Fetch Latest Real-Time Tick Price (no synthetic slippage)
     const latestTick = marketDataEngine.getLatestTick(input.symbol);
-    const fillPrice = latestTick ? latestTick.price : input.price;
+    const fillPrice = latestTick && latestTick.price > 0 ? latestTick.price : input.price;
+    const tradeValue = Number((input.qty * fillPrice).toFixed(2));
+
+    // Check available free paper cash for BUY orders
+    if (input.side === "BUY") {
+      const existingPos = this.positions.get(input.symbol);
+      if (!existingPos || existingPos.side === "LONG") {
+        if (tradeValue > this.cashBalance) {
+          throw new Error(
+            `Insufficient paper trading cash balance. Required: ₹${tradeValue.toLocaleString("en-IN")}, Available: ₹${this.cashBalance.toLocaleString("en-IN")}.`,
+          );
+        }
+      }
+    }
 
     const orderId = `P-ORD-${Math.floor(1000 + Math.random() * 9000)}`;
     const tradeId = `TRD-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -266,8 +310,8 @@ class PaperBroker {
       side: input.side,
       qty: input.qty,
       price: fillPrice,
-      tradeValue: Number((input.qty * fillPrice).toFixed(2)),
-      executionNote: "Simulated Paper Execution matched against real Dhan LTP",
+      tradeValue,
+      executionNote: "Simulated Paper Execution matched against real market LTP",
       timestamp: now,
     };
     this.trades.unshift(trade);

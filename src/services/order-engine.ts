@@ -248,6 +248,7 @@ class OrderEngine {
       price: orderInput.price,
       stopLossPrice: orderInput.stopLossPrice,
       strategyId: orderInput.strategyId,
+      isPaper: true,
     });
 
     if (!riskResult.passed) {
