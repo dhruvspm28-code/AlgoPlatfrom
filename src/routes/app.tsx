@@ -10,7 +10,7 @@ import { authService } from "@/services/auth-service";
  */
 export const Route = createFileRoute("/app")({
   beforeLoad: ({ location }) => {
-    if (!authService.isAuthenticated()) {
+    if (typeof window !== "undefined" && !authService.isAuthenticated()) {
       throw redirect({
         to: "/login",
         search: {

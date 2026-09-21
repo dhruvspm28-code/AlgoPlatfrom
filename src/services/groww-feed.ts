@@ -355,10 +355,17 @@ export class GrowwAPI {
         }
       }
 
-      if (res.status === 403 || isSessionApproval) {
-        const err = new Error("Groww session approval required");
+      if (
+        res.status === 403 ||
+        res.status === 401 ||
+        isSessionApproval ||
+        errText.toLowerCase().includes("please login and try again")
+      ) {
+        const err = new Error(
+          "Groww session approval required. Please log in to Groww Trading API portal (groww.in/trade-api) and approve your session.",
+        );
         (err as unknown as { code: string; status: number }).code = "SESSION_APPROVAL_REQUIRED";
-        (err as unknown as { code: string; status: number }).status = 403;
+        (err as unknown as { code: string; status: number }).status = res.status;
         throw err;
       }
 
@@ -423,12 +430,6 @@ export class GrowwAPI {
       return options.accessToken.trim();
     }
 
-    const apiKey = options.apiKey?.trim();
-    // If the configured key is already a full JWT token, use directly as session token
-    if (apiKey && apiKey.startsWith("eyJ") && apiKey.split(".").length === 3) {
-      return apiKey;
-    }
-
     const mode = options.authMode || (options.accessToken && !options.apiKey ? "access_token" : "api_key_secret");
     if (mode === "access_token") {
       if (!options.accessToken || options.accessToken.trim().length === 0) {
@@ -437,17 +438,22 @@ export class GrowwAPI {
       return options.accessToken.trim();
     }
 
-    if (!options.apiKey || !options.apiSecret) {
-      throw new Error("GROWW_API_KEY or GROWW_API_SECRET missing in api_key_secret mode");
+    if (options.apiKey && options.apiSecret) {
+      // Check disk/memory cache first to avoid Groww rate limiting
+      const cached = GrowwAPI.loadCachedToken();
+      if (cached) {
+        return cached;
+      }
+      return await GrowwAPI.getAccessToken(options.apiKey, options.apiSecret);
     }
 
-    // Check disk/memory cache first to avoid Groww rate limiting
-    const cached = GrowwAPI.loadCachedToken();
-    if (cached) {
-      return cached;
+    const apiKey = options.apiKey?.trim();
+    // Fallback if only apiKey is provided and is already a session token
+    if (apiKey && apiKey.startsWith("eyJ") && apiKey.split(".").length === 3) {
+      return apiKey;
     }
 
-    return await GrowwAPI.getAccessToken(options.apiKey, options.apiSecret);
+    throw new Error("GROWW_API_KEY or GROWW_API_SECRET missing in api_key_secret mode");
   }
 
   public static async validateMarketDataAccess(sessionToken: string): Promise<{ valid: boolean; message: string }> {

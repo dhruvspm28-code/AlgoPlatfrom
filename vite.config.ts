@@ -2,6 +2,11 @@ import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 import type { Plugin } from "vite";
 import { checkEnvConfigured } from "./src/services/safe-env";
 
+// Ensure Nitro builds for Vercel when running in Vercel CI/deployments
+if (process.env.VERCEL) {
+  process.env.NITRO_PRESET = "vercel";
+}
+
 // Ensure server-side environment variables are loaded immediately on boot
 const envStatus = checkEnvConfigured();
 console.log(

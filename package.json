@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --env-file=.env --import jiti/register --test --test-force-exit tests/groww-market-data.test.ts tests/authentication.test.ts tests/terminal-and-historical.test.ts tests/trading-pipeline.test.ts",
     "build": "vite build",
+    "build:vercel": "vite build",
     "build:dev": "vite build --mode development",
     "preview": "vite preview",
     "lint": "eslint .",

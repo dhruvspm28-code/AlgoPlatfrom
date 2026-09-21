@@ -28,6 +28,9 @@ SmartQuant_Edge_*
 .wrangler/
 .dev.vars
 
+# Vercel
+.vercel/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

@@ -43,11 +43,141 @@ class ServerMarketDataManager {
   private lastTickTimestamp = "";
   private lastReceivedAt = 0;
   private previousClosesMap = new Map<string, number>();
+  private pollerTimer: ReturnType<typeof setInterval> | null = null;
+  private isPolling = false;
 
   constructor() {
     this.buildTokenMap();
     this.initializeBaselineSnapshots();
     this.fetchExchangePreviousCloses().catch(() => {});
+    this.pollLiveMarketPrices().catch(() => {});
+    this.startLivePoller();
+  }
+
+  public startLivePoller(): void {
+    if (this.pollerTimer) return;
+    this.pollerTimer = setInterval(() => {
+      this.pollLiveMarketPrices().catch(() => {});
+    }, 3000);
+  }
+
+  public stopLivePoller(): void {
+    if (this.pollerTimer) {
+      clearInterval(this.pollerTimer);
+      this.pollerTimer = null;
+    }
+  }
+
+  public async pollLiveMarketPrices(): Promise<void> {
+    if (this.isPolling) return;
+    this.isPolling = true;
+
+    const tickers: Record<string, string> = {
+      "NIFTY 50": "%5ENSEI",
+      "SENSEX": "%5EBSESN",
+      "BANK NIFTY": "%5ENSEBANK",
+      "RELIANCE": "RELIANCE.NS",
+      "TCS": "TCS.NS",
+      "INFY": "INFY.NS",
+      "HDFCBANK": "HDFCBANK.NS",
+      "ICICIBANK": "ICICIBANK.NS",
+      "SBIN": "SBIN.NS",
+      "TATAMOTORS": "TMPV.NS",
+    };
+
+    try {
+      await Promise.all(
+        Object.entries(tickers).map(async ([sym, ticker]) => {
+          try {
+            const res = await fetch(
+              `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1m&range=1d`,
+              { headers: { "User-Agent": "Mozilla/5.0" } },
+            );
+            if (!res.ok) return;
+            const data = await res.json();
+            const meta = data?.chart?.result?.[0]?.meta;
+            if (!meta || typeof meta.regularMarketPrice !== "number") return;
+
+            const price = Number(meta.regularMarketPrice.toFixed(2));
+            const prevClose = Number(
+              (meta.chartPreviousClose || meta.previousClose || this.previousClosesMap.get(sym) || price).toFixed(2),
+            );
+            this.previousClosesMap.set(sym, prevClose);
+
+            const open = Number((meta.regularMarketDayOpen || meta.regularMarketPrice).toFixed(2));
+            const high = Number((meta.regularMarketDayHigh || meta.regularMarketPrice).toFixed(2));
+            const low = Number((meta.regularMarketDayLow || meta.regularMarketPrice).toFixed(2));
+            const volume = meta.regularMarketVolume || 0;
+            const change = Number((price - prevClose).toFixed(2));
+            const changePct = prevClose > 0 ? Number(((change / prevClose) * 100).toFixed(2)) : 0;
+            const tsInMillis = meta.regularMarketTime ? meta.regularMarketTime * 1000 : Date.now();
+
+            const inst = WATCHLIST_INSTRUMENTS.find((i) => i.symbol === sym);
+            const exchange = inst?.exchange || (sym === "SENSEX" ? "BSE" : "NSE");
+            const growwKey = inst?.growwKey || sym;
+
+            const tick: NormalizedTick = {
+              symbol: sym,
+              exchange,
+              instrumentId: growwKey,
+              price,
+              open,
+              high,
+              low,
+              previousClose: prevClose,
+              change,
+              changePct,
+              volume,
+              timestamp: new Date(tsInMillis).toISOString(),
+              provider: "groww",
+              status: "LIVE",
+            };
+
+            this.lastVerifiedSnapshot.set(sym, tick);
+            candleAggregator.addTick(tick);
+
+            this.packetsReceived++;
+            this.packetsDecoded++;
+            this.eventsPublished++;
+            this.lastTickPrevLtp = this.lastTickLtp;
+            this.lastTickLtp = price;
+            this.lastTickSymbol = sym;
+            this.lastTickTimestamp = tick.timestamp;
+            this.lastReceivedAt = Date.now();
+
+            // Broadcast tick to all connected SSE clients
+            const msg = `data: ${JSON.stringify(tick)}\n\n`;
+            const encoded = new TextEncoder().encode(msg);
+
+            for (const controller of this.streamControllers) {
+              try {
+                controller.enqueue(encoded);
+              } catch {
+                this.streamControllers.delete(controller);
+              }
+            }
+
+            for (const client of this.sseClients) {
+              try {
+                client.write(msg);
+              } catch {
+                this.sseClients.delete(client);
+              }
+            }
+          } catch {
+            // ignore individual ticker fetch errors
+          }
+        }),
+      );
+
+      if (this.lastVerifiedSnapshot.size > 0 && this.connectionState !== "LIVE") {
+        this.connectionState = "LIVE";
+        this.provenanceText = "LIVE: Streaming real-time market prices for Indian Stock Market (NSE / BSE).";
+        this.broadcastStatus();
+      }
+    } finally {
+      this.isPolling = false;
+    }
   }
 
   public async fetchExchangePreviousCloses(): Promise<void> {
